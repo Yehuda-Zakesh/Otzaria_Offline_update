@@ -235,8 +235,15 @@ dart analyze                       # all pure-Dart packages, including otzaria_d
   clean in five and fails in the sixth turns CI red. Note `dart analyze`
   right-aligns severity, so `warning` lines have **no** leading space while `info`
   lines do; a grep assuming indentation misses every warning.
-- **Run the tests when logic changed**: `flutter test` (root, `library_manager`,
-  `launcher_app`) or `dart test` (the pure-Dart packages).
+- **Run the tests when logic changed — prefer focused runs**: the test files
+  that cover what changed, e.g. `flutter test test/custom_apps_test.dart` (root,
+  `library_manager`, `launcher_app`) or `dart test test/x_test.dart` (the
+  pure-Dart packages), with `--plain-name` to narrow while iterating. Avoid
+  needless repeats: a test that passed is not re-run unless something relevant
+  changed since. Still fine, and expected: running a regression test before and
+  after a fix, and widening the run when dependencies changed, a failure turned
+  up, or the change touches shared code with no clear test file. CI runs the full
+  suite on every PR.
 - **Real file I/O does not complete inside `testWidgets`** — its fake-async zone
   never resolves `dart:io` futures, so `pumpAndSettle` hangs forever on a spinner
   waiting on disk. Drive such work with `tester.runAsync(...)` *before* pumping;
