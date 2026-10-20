@@ -24,6 +24,7 @@ class AppDescriptor {
     this.github,
     this.installDir,
     this.portableFile = false,
+    this.interactiveInstall = false,
     this.categorySlugs = const [],
     this.iconFile,
     this.autoIcon = true,
@@ -91,12 +92,11 @@ class AppDescriptor {
   /// הקובץ ששמור אינו מתקין אלא **התוכנה עצמה** — ההתקנה מעתיקה אותו לאן
   /// שהמשתמש יבחר, ואינה מריצה אותו.
   ///
-  /// ⚠️ זה השדה היחיד על הקובץ שכן נשמר ברשומה, ולא במקרה: כל השאר
-  /// (`CustomInstallerKind`) נגזר מהבייטים בזמן ההתקנה, אבל **את זה אי אפשר
-  /// להריח** — exe נייד ומתקין של framework לא מוכר נראים זהים, ושניהם
-  /// נופלים ל-`interactive`. ההרצה של קובץ נייד "כמתקין" רק מפעילה אותו
-  /// מהכונן, והוא לעולם לא מגיע למחשב.
+  /// אי אפשר להסיק זאת מסוג המתקין: קובץ נייד ומתקין לא מוכר נראים זהים.
   final bool portableFile;
+
+  /// פתיחת אשף רגיל גם כשהמתקין מזוהה, בלי דגלי התקנה שקטה או יעד.
+  final bool interactiveInstall;
 
   final AppDetectRules detect;
 
@@ -199,6 +199,7 @@ class AppDescriptor {
       // רשומה שנכתבה לפני שהשדה היה קיים מתכוונת ל"קובץ התקנה", וזה גם
       // ברירת המחדל — ולכן אין כאן שבירת תאימות ואין קפיצת schemaVersion.
       portableFile: install['portable'] == true,
+      interactiveInstall: install['interactive'] == true,
       detect: AppDetectRules.fromJson(
         json['detect'] as Map<String, dynamic>? ?? const {},
       ),
@@ -233,10 +234,11 @@ class AppDescriptor {
           'kind': sourceKind.id,
           if (github case final source?) ...source.toJson(),
         },
-        if (installDir != null || portableFile)
+        if (installDir != null || portableFile || interactiveInstall)
           'install': {
             if (installDir != null) 'dir': installDir,
             if (portableFile) 'portable': true,
+            if (interactiveInstall) 'interactive': true,
           },
         if (!detect.isEmpty) 'detect': detect.toJson(),
       };
@@ -265,6 +267,7 @@ class AppDescriptor {
         github: github,
         installDir: installDir,
         portableFile: portableFile,
+        interactiveInstall: interactiveInstall,
         detect: detect ?? this.detect,
       );
 
@@ -284,6 +287,7 @@ class AppDescriptor {
         github: github,
         installDir: installDir,
         portableFile: portableFile,
+        interactiveInstall: interactiveInstall,
         detect: detect,
       );
 

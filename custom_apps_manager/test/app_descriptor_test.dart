@@ -11,6 +11,18 @@ const _minimal = '''
 ''';
 
 void main() {
+  test('העדפת אשף התקנה נשמרת גם לאחר שינוי שם או מדיה', () {
+    final app = AppDescriptor.fromJson({
+      'id': 'freefilesync',
+      'name': 'FreeFileSync',
+      'install': {'interactive': true},
+    });
+    for (final edited in [app, app.copyWith(name: 'FFS'), app.withoutMedia()]) {
+      expect(AppDescriptor.parse(edited.encode()).interactiveInstall, isTrue);
+    }
+    expect(AppDescriptor.parse(_minimal).interactiveInstall, isFalse);
+  });
+
   group('אימות המזהה', () {
     test('מזהים תקינים מתקבלים', () {
       for (final id in [

@@ -105,12 +105,14 @@ class CustomAppLocalFileSection extends StatelessWidget {
     required this.kept,
     required this.sniffedKind,
     required this.onPick,
+    this.error,
   });
 
   final String? path;
   final StoredInstaller? kept;
   final CustomInstallerKind? sniffedKind;
   final VoidCallback onPick;
+  final String? error;
 
   @override
   Widget build(BuildContext context) {
@@ -142,6 +144,10 @@ class CustomAppLocalFileSection extends StatelessWidget {
             t.installerKindSniffed(installerKindLabelOf(kind, t)),
             style: hint,
           ),
+        ],
+        if (error case final message?) ...[
+          const SizedBox(height: AppTokens.spaceSM),
+          InfoErrorRow(message: message),
         ],
         const SizedBox(height: AppTokens.spaceSM),
         ActionButton.neutral(

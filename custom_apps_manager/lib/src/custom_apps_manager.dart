@@ -454,6 +454,9 @@ class CustomAppsManager {
         throw AppDescriptorException(t.githubNoMatchingAsset(latest.tagName));
       }
     }
+    if (!CustomAppInstaller.supportsPackageName(asset.name)) {
+      throw AppDescriptorException(t.installerUnsupportedFile(asset.name));
+    }
 
     final target = store.installerPathNamed(id, asset.name);
     final temp = '$target.part';

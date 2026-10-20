@@ -1324,6 +1324,91 @@ void main() {
       return m;
     }
 
+    for (final preloaded in [false, true]) {
+      test('ארכיון מקור שתואם תבנית שמורה אינו יורד, release מראש=$preloaded',
+          () async {
+        const name = 'audacity-sources-4.0.1.tar.xz';
+        final source = GithubSource(
+          owner: 'o',
+          repo: 'r',
+          assetPattern: GithubAssetPattern.fromAssetName(name),
+        );
+        const asset = GithubAsset(
+          name: name,
+          downloadUrl: 'https://example.test/$name',
+          sizeBytes: 50,
+        );
+        final downloads = <Uri>[];
+        final m = CustomAppsManager(
+          resolveMirrorDir: () async => root,
+          readVersion: (_) => '1',
+          processRunner: runner.call,
+          githubClient: GithubAppClient(
+            httpClient: MockClient((request) async {
+              if (request.url.host == 'example.test') {
+                downloads.add(request.url);
+                return http.Response.bytes(bytes, 200);
+              }
+              return http.Response(
+                jsonEncode([
+                  {
+                    'tag_name': 'v4.0.1',
+                    'prerelease': false,
+                    'draft': false,
+                    'assets': [
+                      {
+                        'name': name,
+                        'browser_download_url': asset.downloadUrl,
+                        'size': asset.sizeBytes,
+                      },
+                    ],
+                  },
+                ]),
+                200,
+                headers: {'content-type': 'application/json; charset=utf-8'},
+              );
+            }),
+          ),
+        );
+        await m.add(
+          AppDescriptor(
+            id: 'org.example.gh',
+            name: 'gh',
+            sourceKind: AppSourceKind.github,
+            github: source,
+          ),
+        );
+        await m.attachInstaller('org.example.gh',
+            sourcePath: writeFile(p.join(root, 'dl', 'App-1.exe'), 'old'),
+            version: '1');
+        final before = (await m.load('org.example.gh'))!;
+
+        await expectLater(
+          m.downloadFromGithub(
+            'org.example.gh',
+            release: preloaded
+                ? const GithubRelease(
+                    tagName: 'v4.0.1',
+                    isPrerelease: false,
+                    assets: [asset],
+                  )
+                : null,
+            releaseSource: preloaded ? source : null,
+          ),
+          throwsA(isA<AppDescriptorException>()
+              .having((e) => e.message, 'message', contains(name))),
+        );
+
+        expect(downloads, isEmpty);
+        final after = (await m.load('org.example.gh'))!;
+        expect(after.installer!.fileName, 'App-1.exe');
+        expect(after.installer!.sha256, before.installer!.sha256);
+        expect(after.descriptor.encode(), before.descriptor.encode());
+        expect(await File(p.join(appDir(), 'App-1.exe')).readAsString(), 'old');
+        expect(File(p.join(appDir(), '$name.part')).existsSync(), isFalse);
+      });
+    }
+
     test('קובץ חדש מחליף את הישן, והישן נמחק', () async {
       final m =
           await withInstaller(oldName: 'App-1.exe', assetName: 'App-2.exe');

@@ -1736,10 +1736,12 @@ abstract class CustomAppsStrings {
   String get pickInstallerDialogTitle;
   String installerKindSniffed(String kind);
 
-  /// "הקובץ הוא התוכנה עצמה". השאלה היחידה על הקובץ שכן נשאלת, כי
-  /// **אי אפשר להסיק אותה מהבייטים**: exe נייד ומתקין שלא זוהה נראים זהים.
+  /// "הקובץ הוא התוכנה עצמה". נשאל במפורש כי
+  /// **אי אפשר להסיק אותו מהבייטים**: exe נייד ומתקין שלא זוהה נראים זהים.
   String get portableFileLabel;
   String get portableFileHint;
+  String get interactiveInstallLabel;
+  String get interactiveInstallHint;
   String get pickCopyTargetDialogTitle;
   String copiedFileSnack(String path);
 
@@ -1880,6 +1882,7 @@ abstract class CustomAppsDomainStrings {
   // ── התקנה ──
   String get noInstallerInMirror;
   String installerFileMissing(String path);
+  String installerUnsupportedFile(String fileName);
   String installerExitCode(int exitCode, String output);
   String installerElevatedRetryFailed(
     int firstExitCode,
@@ -1888,6 +1891,7 @@ abstract class CustomAppsDomainStrings {
   );
   String installerElevatedRetryDeclined(int firstExitCode);
   String get installerElevationDeclined;
+  String get installerCancelled;
   String get installerDigestMismatch;
 
   /// קובץ התקנה בלי sha256 שמור אינו מורץ עד שמישהו מאשר אותו כאן.

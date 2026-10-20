@@ -45,6 +45,9 @@ class CustomAppInstaller {
   final FileReplacer _replaceFile;
   final String? _downloadsDir;
 
+  static bool supportsPackageName(String name) =>
+      const ['.exe', '.msi', '.zip'].contains(p.extension(name).toLowerCase());
+
   String get downloadsDir => _downloadsDir ?? _defaultDownloadsDir();
 
   static String _defaultDownloadsDir() {
@@ -86,10 +89,24 @@ class CustomAppInstaller {
       );
     }
 
-    final command = kind.silentCommand(
-      installerPath: installerPath,
-      installDir: descriptor.installDir,
-    );
+    if (kind != CustomInstallerKind.msi &&
+        p.extension(installerPath).toLowerCase() != '.exe') {
+      throw AppDescriptorException(
+        t.installerUnsupportedFile(p.basename(installerPath)),
+      );
+    }
+
+    final command = descriptor.interactiveInstall
+        ? CustomInstallerCommand(
+            executable:
+                kind == CustomInstallerKind.msi ? 'msiexec' : installerPath,
+            arguments:
+                kind == CustomInstallerKind.msi ? ['/i', installerPath] : [],
+          )
+        : kind.silentCommand(
+            installerPath: installerPath,
+            installDir: descriptor.installDir,
+          );
     if (command == null) return CustomInstallOutcome(kind: kind);
 
     if (command.rawLastArgument &&
@@ -104,7 +121,11 @@ class CustomAppInstaller {
       if (!ElevatedProcess.isElevationRequired(e)) rethrow;
       return _installViaShell(kind, command, elevate: true);
     }
-    if (kind.retriesElevatedOn(result.exitCode) && !await _isElevated()) {
+    _throwIfCancelled(kind, result.exitCode);
+    // אשף שנכשל כבר הציג את השגיאה; הרמה הייתה פותחת אותו שוב.
+    if (!descriptor.interactiveInstall &&
+        kind.retriesElevatedOn(result.exitCode) &&
+        !await _isElevated()) {
       return _installViaShell(
         kind,
         command,
@@ -121,6 +142,15 @@ class CustomAppInstaller {
       );
     }
     return CustomInstallOutcome(kind: kind);
+  }
+
+  /// ‏1602 הוא ERROR_INSTALL_USEREXIT של MSI.
+  static void _throwIfCancelled(CustomInstallerKind kind, int exitCode) {
+    if (kind == CustomInstallerKind.msi && exitCode == 1602) {
+      throw AppDescriptorException(
+        AppL10n.strings.customAppsDomain.installerCancelled,
+      );
+    }
   }
 
   Future<CustomInstallOutcome> _installViaShell(
@@ -143,6 +173,7 @@ class CustomAppInstaller {
             : t.installerElevatedRetryDeclined(firstExitCode),
       );
     }
+    _throwIfCancelled(kind, result.exitCode);
     if (!kind.isSuccessExitCode(result.exitCode)) {
       final output = 'stderr: ${result.stderr}';
       throw AppDescriptorException(

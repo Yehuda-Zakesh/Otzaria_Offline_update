@@ -7,10 +7,12 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:custom_apps_manager/custom_apps_manager.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:launcher_app/src/controllers/custom_apps_controller.dart';
 import 'package:launcher_app/src/screens/custom_apps/custom_app_detail_view.dart';
+import 'package:launcher_app/src/screens/custom_apps/custom_app_form_source.dart';
 import 'package:launcher_app/src/screens/custom_apps/custom_app_store_card.dart';
 import 'package:launcher_app/src/screens/custom_apps/custom_apps_screen.dart';
 import 'package:launcher_app/src/screens/custom_apps/custom_apps_settings_card.dart';
@@ -21,6 +23,7 @@ import 'package:launcher_app/src/services/app_logger.dart';
 import 'package:launcher_app/src/services/byte_size.dart';
 import 'package:launcher_app/src/services/custom_app_detection_snapshot.dart';
 import 'package:launcher_app/src/theme/theme_exports.dart';
+import 'package:launcher_app/src/widgets/settings_card.dart';
 import 'package:otzaria_l10n/otzaria_l10n.dart';
 import 'package:otzaria_manager/otzaria_manager.dart';
 import 'package:path/path.dart' as p;
@@ -59,6 +62,7 @@ void main() {
     AppSourceKind source = AppSourceKind.manual,
     bool withInstaller = false,
     bool portableFile = false,
+    bool interactiveInstall = false,
   }) async {
     await tester.runAsync(() async {
       await controller.add(
@@ -70,6 +74,7 @@ void main() {
           categorySlugs: categories,
           autoIcon: autoIcon,
           portableFile: portableFile,
+          interactiveInstall: interactiveInstall,
           sourceKind: source,
           github: source == AppSourceKind.github
               ? const GithubSource(
@@ -395,6 +400,134 @@ void main() {
 
       expect(find.text('הקובץ הוא התוכנה עצמה'), findsOneWidget);
       expect(find.textContaining('תישאלו לאן להעתיק'), findsOneWidget);
+    });
+
+    testWidgets('בחירת ארכיון המקור של Audacity נדחית ואפשר לבחור מתקין',
+        (tester) async {
+      await openForm(tester);
+      const source = GithubAsset(
+        name: 'audacity-sources-4.0.1.tar.xz',
+        downloadUrl: 'https://example.test/source.tar.xz',
+        sizeBytes: 100,
+      );
+      const installer = GithubAsset(
+        name: 'audacity-win-4.0.1-x64.exe',
+        downloadUrl: 'https://example.test/installer.exe',
+        sizeBytes: 200,
+      );
+      CustomAppGithubSection section() => tester.widget<CustomAppGithubSection>(
+            find.byType(CustomAppGithubSection),
+          );
+
+      section().onSelectAsset(source);
+      await tester.pumpAndSettle();
+      expect(section().selectedAsset, isNull);
+      expect(section().error, contains(source.name));
+
+      section().onSelectAsset(installer);
+      await tester.pumpAndSettle();
+      expect(section().selectedAsset, installer);
+      expect(section().error, isNull);
+    });
+
+    testWidgets('קובץ מקומי שאינו נתמך נדחה, ובחירת EXE אחריו מנקה את השגיאה',
+        (tester) async {
+      final picker = _FakeFilePicker();
+      FilePicker.platform = picker;
+      addTearDown(() => picker.active = false);
+      const sourceName = 'audacity-sources-4.0.1.tar.xz';
+      final exe = p.join(tempDir.path, 'audacity-win-4.0.1-x64.exe');
+      await tester.runAsync(() => File(exe).writeAsString('MZ'));
+
+      // החזרת המיקוד לחלון אחרי הבורר עוברת בערוץ פלטפורמה אמיתי.
+      Future<void> pick(String path) async {
+        picker.next = path;
+        await tester.tap(find.text('בחירת קובץ'));
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      CustomAppLocalFileSection section() =>
+          tester.widget(find.byType(CustomAppLocalFileSection));
+
+      await openForm(tester);
+      await tester.tap(find.text('מקובץ שלי'));
+      await tester.pumpAndSettle();
+
+      await pick(p.join(tempDir.path, sourceName));
+      expect(picker.lastExtensions, ['exe', 'msi', 'zip']);
+      expect(section().path, isNull);
+      expect(section().error, contains(sourceName));
+      expect(find.textContaining(sourceName), findsOneWidget);
+
+      await pick(exe);
+      expect(section().path, exe);
+      expect(section().error, isNull);
+    });
+
+    Finder switchOf(String label) => find.descendant(
+          of: find.ancestor(
+            of: find.text(label),
+            matching: find.byType(SettingsActionTile),
+          ),
+          matching: find.byType(Switch),
+        );
+
+    // pumpAndSettle אינו נרגע אחרי שמירה אמיתית; מחכים לרשומה עצמה.
+    Future<void> saveForm(
+      WidgetTester tester,
+      bool Function(AppDescriptor saved) done,
+    ) async {
+      await tester.tap(find.text('שמירה'));
+      for (var i = 0; i < 100; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump(const Duration(milliseconds: 50));
+        if (done(controller.apps.single.descriptor)) return;
+      }
+      fail('השמירה לא הגיעה לרשומה');
+    }
+
+    testWidgets('עריכה שומרת בחירה בהתקנה רגילה', (tester) async {
+      await addApp(tester, withInstaller: true, autoIcon: false);
+      await openManager(tester);
+      await tester.tap(find.byTooltip('עריכה'));
+      await tester.pumpAndSettle();
+
+      final toggle = switchOf('התקנה רגילה במקום התקנה מהירה');
+      expect(tester.widget<Switch>(toggle).value, isFalse);
+      await tester.tap(toggle);
+      await tester.pump();
+
+      await saveForm(tester, (d) => d.interactiveInstall);
+      expect(controller.apps.single.descriptor.interactiveInstall, isTrue);
+    });
+
+    testWidgets('סימון "התוכנה עצמה" מבטל בשמירה את ההתקנה הרגילה',
+        (tester) async {
+      await addApp(
+        tester,
+        interactiveInstall: true,
+        withInstaller: true,
+        autoIcon: false,
+      );
+      await openManager(tester);
+      await tester.tap(find.byTooltip('עריכה'));
+      await tester.pumpAndSettle();
+
+      final interactive = switchOf('התקנה רגילה במקום התקנה מהירה');
+      expect(tester.widget<Switch>(interactive).value, isTrue);
+      await tester.tap(switchOf('הקובץ הוא התוכנה עצמה'));
+      await tester.pump();
+      expect(interactive, findsNothing);
+
+      await saveForm(tester, (d) => d.portableFile);
+      final saved = controller.apps.single.descriptor;
+      expect(saved.portableFile, isTrue);
+      expect(saved.interactiveInstall, isFalse);
     });
 
     // הריחרוח עצמו נבדק ב-custom_apps_manager; כאן נבדק שיש לו תרגום, ושהוא
@@ -2058,5 +2191,37 @@ class _GatedLoadManager extends CustomAppsManager {
     gates.add(gate);
     await gate.future;
     return entries;
+  }
+}
+
+/// בורר הקבצים של המערכת אינו קיים בבדיקות; מחזיר את מה שהבדיקה קבעה.
+/// ב-file_picker 8.3.7 אי אפשר לאפס את `platform`, ולכן בסיום הוא נכבה.
+class _FakeFilePicker extends FilePicker {
+  String? next;
+  List<String>? lastExtensions;
+  bool active = true;
+
+  @override
+  Future<FilePickerResult?> pickFiles({
+    String? dialogTitle,
+    String? initialDirectory,
+    FileType type = FileType.any,
+    List<String>? allowedExtensions,
+    Function(FilePickerStatus)? onFileLoading,
+    bool allowCompression = true,
+    int compressionQuality = 30,
+    bool allowMultiple = false,
+    bool withData = false,
+    bool withReadStream = false,
+    bool lockParentWindow = false,
+    bool readSequential = false,
+  }) async {
+    if (!active) throw StateError('FilePicker.platform נשאר מבדיקה קודמת');
+    lastExtensions = allowedExtensions;
+    final path = next;
+    if (path == null) return null;
+    return FilePickerResult([
+      PlatformFile(path: path, name: p.basename(path), size: 0),
+    ]);
   }
 }

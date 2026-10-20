@@ -3037,6 +3037,9 @@ class _CustomAppsDomain extends CustomAppsDomainStrings {
   @override
   String installerFileMissing(String path) => 'Installer file not found: $path';
   @override
+  String installerUnsupportedFile(String fileName) =>
+      'The file "$fileName" is not a supported installation package. Choose a Windows EXE or MSI installer, or a ZIP archive to copy. A source archive does not install the program. You can replace the file by editing the program.';
+  @override
   String installerExitCode(int exitCode, String output) =>
       'The installation failed (exit code $exitCode).\n$output';
   @override
@@ -3053,6 +3056,10 @@ class _CustomAppsDomain extends CustomAppsDomainStrings {
       'The installation failed (exit code $firstExitCode). It was not '
       'retried with administrator rights: the Windows permission prompt was '
       'declined, or access was denied.';
+  @override
+  String get installerCancelled =>
+      'The installation was cancelled in the installer. The program was not '
+      'installed.';
   @override
   String get installerElevationDeclined =>
       'The installer requires administrator rights, and the request was '
@@ -3356,6 +3363,11 @@ class _CustomApps extends CustomAppsStrings {
   String installerKindSniffed(String kind) => 'Detected from the file: $kind';
   @override
   String get portableFileLabel => 'The file is the program itself';
+  @override
+  String get interactiveInstallLabel => 'Use the installation wizard';
+  @override
+  String get interactiveInstallHint =>
+      'For programs that do not support silent installation. Choose the installation folder and complete the steps in the installer window.';
   @override
   String get portableFileHint =>
       'Tick this when the file is not an installer but the program itself. '

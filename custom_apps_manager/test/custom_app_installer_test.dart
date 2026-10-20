@@ -54,6 +54,15 @@ class _FakeShell {
 }
 
 void main() {
+  test('בחירת חבילה לפי שם מציעה רק EXE, MSI ו-ZIP', () {
+    for (final name in ['Setup.exe', 'Setup.MSI', 'portable.ZIP']) {
+      expect(CustomAppInstaller.supportsPackageName(name), isTrue);
+    }
+    for (final name in ['sources.tar.xz', 'app.exe.sha256', 'app.dmg']) {
+      expect(CustomAppInstaller.supportsPackageName(name), isFalse);
+    }
+  });
+
   late String root;
   late String downloads;
   late _FakeRunner runner;
@@ -135,6 +144,123 @@ void main() {
   });
 
   group('סוג ההתקנה נקבע מהקובץ, לא מהרשומה', () {
+    test('התקנה רגילה של MSI משאירה את msiexec ואת קודי ההצלחה', () async {
+      runner.exitCode = 3010;
+      final app = AppDescriptor.fromJson({
+        ...descriptor().toJson(),
+        'install': {'interactive': true},
+      });
+      final path = msi();
+
+      await installer.install(descriptor: app, installerPath: path);
+
+      expect(runner.calls.single.executable, 'msiexec');
+      expect(runner.calls.single.arguments, ['/i', path]);
+    });
+
+    AppDescriptor interactiveApp() => AppDescriptor.fromJson({
+          ...descriptor().toJson(),
+          'install': {'interactive': true},
+        });
+
+    for (final code in [1603, 1625, 1925]) {
+      test('התקנה רגילה של MSI שנכשלה ב-$code אינה נפתחת שוב מורמת', () async {
+        runner.exitCode = code;
+
+        await expectLater(
+          installer.install(descriptor: interactiveApp(), installerPath: msi()),
+          throwsA(isA<AppDescriptorException>()
+              .having((e) => e.message, 'message', contains('$code'))),
+        );
+        expect(runner.calls, hasLength(1));
+        expect(elevated.calls, isEmpty);
+      });
+    }
+
+    test('ביטול אשף MSI (1602) מדווח כביטול ואינו מורץ שוב', () async {
+      runner.exitCode = 1602;
+
+      await expectLater(
+        installer.install(descriptor: interactiveApp(), installerPath: msi()),
+        throwsA(isA<AppDescriptorException>().having(
+          (e) => e.message,
+          'message',
+          AppL10n.strings.customAppsDomain.installerCancelled,
+        )),
+      );
+      expect(runner.calls, hasLength(1));
+      expect(elevated.calls, isEmpty);
+    });
+
+    test('MSI שקט: 1603 ואז 1602 מההרצה המורמת מדווח כביטול', () async {
+      runner.exitCode = 1603;
+      elevated.exitCode = 1602;
+
+      await expectLater(
+        installer.install(descriptor: descriptor(), installerPath: msi()),
+        throwsA(isA<AppDescriptorException>().having(
+          (e) => e.message,
+          'message',
+          AppL10n.strings.customAppsDomain.installerCancelled,
+        )),
+      );
+      expect(elevated.calls.single.elevate, isTrue);
+    });
+
+    test('ביטול אשף MSI אחרי הרמה בעקבות 740 מדווח כביטול', () async {
+      runner.requiresElevation = true;
+      elevated.exitCode = 1602;
+
+      await expectLater(
+        installer.install(descriptor: interactiveApp(), installerPath: msi()),
+        throwsA(isA<AppDescriptorException>().having(
+          (e) => e.message,
+          'message',
+          AppL10n.strings.customAppsDomain.installerCancelled,
+        )),
+      );
+      expect(elevated.calls.single.elevate, isTrue);
+      expect(elevated.calls.single.arguments, ['/i', msi()]);
+    });
+
+    test('התקנה רגילה אינה מריצה ארכיון או קובץ נייד', () async {
+      for (final portable in [false, true]) {
+        final app = AppDescriptor.fromJson({
+          ...descriptor().toJson(),
+          'install': {'interactive': true, 'portable': portable},
+        });
+        final outcome = await installer.install(
+          descriptor: app,
+          installerPath: portable ? innoSetup() : zipArchive(),
+        );
+        expect(outcome.copiedPath, isNotNull);
+      }
+      expect(runner.calls, isEmpty);
+      expect(elevated.calls, isEmpty);
+    });
+
+    for (final elevate in [false, true]) {
+      test('התקנה רגילה של Inno אינה שולחת דגלים, הרמה=$elevate', () async {
+        runner.requiresElevation = elevate;
+        final app = AppDescriptor.fromJson({
+          ...descriptor(installDir: r'C:\Apps\X').toJson(),
+          'install': {'dir': r'C:\Apps\X', 'interactive': true},
+        });
+
+        final outcome = await installer.install(
+          descriptor: app,
+          installerPath: innoSetup(),
+        );
+
+        expect(runner.calls.single.arguments, isEmpty);
+        expect(outcome.kind, CustomInstallerKind.innoSetup);
+        if (elevate) {
+          expect(elevated.calls.single.arguments, isEmpty);
+          expect(elevated.calls.single.elevate, isTrue);
+        }
+      });
+    }
+
     test('Inno מזוהה, ומורצות הדגלים השקטים שלו', () async {
       await installer.install(
         descriptor: descriptor(installDir: r'C:\Apps\X'),
@@ -198,6 +324,28 @@ void main() {
     );
     expect(runner.calls, isEmpty);
   });
+
+  for (final interactive in [false, true]) {
+    test('ארכיון המקור של Audacity אינו מורץ, אשף=$interactive', () async {
+      const name = 'audacity-sources-4.0.1.tar.xz';
+      final path = writeBytes(name, [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]);
+      final app = AppDescriptor.fromJson({
+        ...descriptor().toJson(),
+        'install': {'interactive': interactive},
+      });
+
+      await expectLater(
+        installer.install(descriptor: app, installerPath: path),
+        throwsA(isA<AppDescriptorException>().having(
+          (e) => e.message,
+          'message',
+          allOf(contains(name), contains('EXE'), contains('MSI')),
+        )),
+      );
+      expect(runner.calls, isEmpty);
+      expect(elevated.calls, isEmpty);
+    });
+  }
 
   test('קוד יציאה שאינו אפס — ההודעה נושאת אותו ואת הפלט', () async {
     runner.exitCode = 1603;

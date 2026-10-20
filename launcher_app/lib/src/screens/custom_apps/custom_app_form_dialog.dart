@@ -68,15 +68,17 @@ class _CustomAppFormDialogState extends State<CustomAppFormDialog> {
 
   /// מקור "קובץ שלי" — הקובץ שנבחר.
   String? _localFilePath;
+  String? _localFileError;
 
   /// מה שהריחרוח מצא בקובץ שנבחר עכשיו, או `null` כשאין קובץ כזה או שלא
   /// ניתן היה לקבוע. מוצג בלבד — ההכרעה האמיתית נעשית שוב בזמן ההתקנה,
   /// מהבייטים של הקובץ ששמור על הכונן.
   CustomInstallerKind? _sniffedKind;
 
-  /// "הקובץ אינו מתקין אלא התוכנה עצמה". השאלה היחידה על הקובץ שכן נשאלת,
-  /// כי אי אפשר להריח אותה: exe נייד ומתקין לא-מוכר נראים זהים.
+  /// "הקובץ אינו מתקין אלא התוכנה עצמה". נשאל במפורש,
+  /// כי אי אפשר להריח אותו: exe נייד ומתקין לא-מוכר נראים זהים.
   bool _portableFile = false;
+  bool _interactiveInstall = false;
 
   /// מקור "גיטהאב" — מה שחזר מהריפו.
   GithubRelease? _release;
@@ -100,6 +102,7 @@ class _CustomAppFormDialogState extends State<CustomAppFormDialog> {
       _exeName.text = descriptor.detect.exeName ?? '';
       _source = descriptor.sourceKind;
       _portableFile = descriptor.portableFile;
+      _interactiveInstall = descriptor.interactiveInstall;
       _categories.addAll(descriptor.categorySlugs);
       // המדיה נטענת כנתיבים מלאים, כדי שמה שנשאר ומה שנוסף עכשיו ייראו
       // אותו הדבר לשמירה.
@@ -206,7 +209,14 @@ class _CustomAppFormDialogState extends State<CustomAppFormDialog> {
   /// בחירת קובץ מתוך ה-release — ומיד גם זיהוי סוג ההתקנה משמו.
   void _selectAsset(GithubAsset asset) {
     setState(() {
-      _selectedAsset = asset;
+      if (CustomAppInstaller.supportsPackageName(asset.name)) {
+        _selectedAsset = asset;
+        _githubError = null;
+      } else {
+        _selectedAsset = null;
+        _githubError = context.strings.customAppsDomain
+            .installerUnsupportedFile(asset.name);
+      }
     });
   }
 
@@ -216,13 +226,22 @@ class _CustomAppFormDialogState extends State<CustomAppFormDialog> {
     final t = context.strings.customApps;
     final path = await NativeFileDialogs.pickFile(
       dialogTitle: t.pickInstallerDialogTitle,
+      allowedExtensions: const ['exe', 'msi', 'zip'],
     );
     if (path == null || !mounted) return;
+    if (!CustomAppInstaller.supportsPackageName(path)) {
+      setState(
+        () => _localFileError = context.strings.customAppsDomain
+            .installerUnsupportedFile(p.basename(path)),
+      );
+      return;
+    }
 
     // סוג ההתקנה **אינו** נשאל ואינו נשמר — הוא נקבע מהקובץ עצמו בזמן
     // ההתקנה. ראו `CustomAppInstaller.install`.
     setState(() {
       _localFilePath = path;
+      _localFileError = null;
       _sniffedKind = null;
       if (_name.text.isEmpty) _name.text = p.basenameWithoutExtension(path);
     });
@@ -385,6 +404,7 @@ class _CustomAppFormDialogState extends State<CustomAppFormDialog> {
       installDir:
           _installDir.text.trim().isEmpty ? null : _installDir.text.trim(),
       portableFile: _portableFile,
+      interactiveInstall: !_portableFile && _interactiveInstall,
       detect: AppDetectRules(
         exeName: _exeName.text.trim().isEmpty ? null : _exeName.text.trim(),
         registryDisplayName: existing?.detect.registryDisplayName,
@@ -480,6 +500,7 @@ class _CustomAppFormDialogState extends State<CustomAppFormDialog> {
                   kept: _keptInstaller,
                   sniffedKind: _sniffedKind,
                   onPick: _pickLocalFile,
+                  error: _localFileError,
                 ),
               const SizedBox(height: AppTokens.spaceLG),
               // "זו התוכנה עצמה" נשאל דווקא משום שאי אפשר להריח אותו: exe
@@ -493,6 +514,15 @@ class _CustomAppFormDialogState extends State<CustomAppFormDialog> {
               ),
               const SizedBox(height: AppTokens.spaceLG),
               FormSectionHeader(t.formSectionInstall),
+              if (!_portableFile)
+                SettingsActionTile.switchTile(
+                  icon: FluentIcons.window_24_regular,
+                  title: t.interactiveInstallLabel,
+                  subtitle: t.interactiveInstallHint,
+                  value: _interactiveInstall,
+                  onChanged: (value) =>
+                      setState(() => _interactiveInstall = value),
+                ),
               FormTextField(
                 label: t.installDirLabel,
                 controller: _installDir,

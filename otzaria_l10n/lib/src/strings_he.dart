@@ -2820,6 +2820,9 @@ class _CustomAppsDomain extends CustomAppsDomainStrings {
   @override
   String installerFileMissing(String path) => 'קובץ ההתקנה אינו נמצא: $path';
   @override
+  String installerUnsupportedFile(String fileName) =>
+      'הקובץ "$fileName" אינו חבילת התקנה נתמכת. יש לבחור מתקין Windows מסוג EXE או MSI, או ארכיון ZIP להעתקה. ארכיון קוד מקור אינו מתקין את התוכנה. אפשר לשנות את הקובץ בעריכת התוכנה.';
+  @override
   String installerExitCode(int exitCode, String output) =>
       'ההתקנה הסתיימה בשגיאה (קוד $exitCode).\n$output';
   @override
@@ -2834,6 +2837,9 @@ class _CustomAppsDomain extends CustomAppsDomainStrings {
   String installerElevatedRetryDeclined(int firstExitCode) =>
       'ההתקנה הסתיימה בשגיאה (קוד $firstExitCode). ניסיון חוזר בהרשאות '
       'מנהל לא בוצע: הבקשה נדחתה בחלון ההרשאות של ווינדוס, או שהגישה נחסמה.';
+  @override
+  String get installerCancelled =>
+      'ההתקנה בוטלה באשף ההתקנה. התוכנה לא הותקנה.';
   @override
   String get installerElevationDeclined =>
       'המתקין דורש הרשאות מנהל, והבקשה נדחתה או שהגישה נחסמה. כדי להתקין, '
@@ -3121,6 +3127,11 @@ class _CustomApps extends CustomAppsStrings {
   String installerKindSniffed(String kind) => 'זוהה מהקובץ: $kind';
   @override
   String get portableFileLabel => 'הקובץ הוא התוכנה עצמה';
+  @override
+  String get interactiveInstallLabel => 'התקנה רגילה במקום התקנה מהירה';
+  @override
+  String get interactiveInstallHint =>
+      'לתוכנות שאינן תומכות בהתקנה שקטה. ייפתח אשף התקנה שבו תבחרו את מיקום ההתקנה ותסיימו את השלבים בעצמכם.';
   @override
   String get portableFileHint =>
       'סמנו כשהקובץ אינו מתקין אלא התוכנה עצמה. בהתקנה תישאלו לאן להעתיק '
