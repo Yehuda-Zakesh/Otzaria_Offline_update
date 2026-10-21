@@ -913,7 +913,11 @@ void main() {
         errorReports: reports,
         searchFeedback: feedbackFor(locator),
       );
-      tester.widget<HomeScreen>(screen(HomeScreen)).otzaria.launchPath = 'x';
+      final otzaria = tester.widget<HomeScreen>(screen(HomeScreen)).otzaria;
+      await settle(
+          tester, () => otzaria.status != OtzariaModuleStatus.checking);
+      expect(otzaria.status, isNot(OtzariaModuleStatus.checking));
+      otzaria.launchPath = 'x';
     }
 
     Future<void> openAndClose(
