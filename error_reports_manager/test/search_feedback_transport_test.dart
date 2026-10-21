@@ -192,6 +192,166 @@ void main() {
         (jsonDecode(await block.readAsString()) as Map)['delaySeconds'], 43200);
   });
 
+  test('no connection backs off on this computer only, not on the drive',
+      () async {
+    identity.registeredKeyId = identity.keyId;
+    await SearchFeedbackIdentityStore(() async => Directory(source))
+        .save(identity);
+    var offlineRequests = 0;
+    final offline =
+        SearchFeedbackTransport(destination, client: MockClient((_) async {
+      offlineRequests++;
+      throw const SocketException('down');
+    }));
+    addTearDown(offline.close);
+    expect(await offline.retryAt(), isNull);
+    await offline.collect(source, mayCollect: () async => true);
+    final before = DateTime.now();
+    expect(await offline.upload(), (sent: 0, rejected: 0, remaining: 1));
+    final retryAt = await offline.retryAt();
+    expect(retryAt, isNotNull);
+    expect(retryAt!.isAfter(before.add(const Duration(seconds: 29))), isTrue);
+    expect(await offline.upload(), (sent: 0, rejected: 0, remaining: 1));
+    expect(offlineRequests, 1);
+    expect(await File(p.join(destination, 'retry-at.txt')).exists(), isFalse);
+
+    // אותו כונן במחשב המקוון: אין השהיה שנסעה איתו.
+    var onlineRequests = 0;
+    final online =
+        SearchFeedbackTransport(destination, client: MockClient((_) async {
+      onlineRequests++;
+      return http.Response('{"accepted":1}', 200);
+    }));
+    addTearDown(online.close);
+    expect(await online.retryAt(), isNull);
+    expect(await online.upload(), (sent: 1, rejected: 0, remaining: 0));
+    expect(onlineRequests, 1);
+  });
+
+  test('a server Retry-After travels with the drive and is honoured', () async {
+    identity.registeredKeyId = identity.keyId;
+    await SearchFeedbackIdentityStore(() async => Directory(source))
+        .save(identity);
+    final first = SearchFeedbackTransport(destination,
+        client: MockClient((_) async => http.Response(
+            '{"error":"rate_limited"}', 429,
+            headers: {'retry-after': '120'})));
+    addTearDown(first.close);
+    await first.collect(source, mayCollect: () async => true);
+    expect(await first.upload(), (sent: 0, rejected: 0, remaining: 1));
+
+    var requests = 0;
+    final other =
+        SearchFeedbackTransport(destination, client: MockClient((_) async {
+      requests++;
+      return http.Response('{"accepted":1}', 200);
+    }));
+    addTearDown(other.close);
+    final retryAt = await other.retryAt();
+    expect(retryAt, isNotNull);
+    expect(retryAt!.isAfter(DateTime.now().add(const Duration(seconds: 100))),
+        isTrue);
+    expect(await other.upload(), (sent: 0, rejected: 0, remaining: 1));
+    expect(requests, 0);
+  });
+
+  group('מקטע גדול מדי מפוצל ונשלח באותו סבב', () {
+    Future<void> addEvents(int count) async {
+      for (var i = 0; i < count; i++) {
+        await queue.append({
+          'type': 'search',
+          'eventId': 'extra-$i',
+          'clientTime': DateTime.now().toUtc().toIso8601String(),
+          'query': 'q$i',
+        }, {
+          'app': 'otzaria',
+          'appVersion': '1.2',
+          'platform': 'windows'
+        });
+      }
+    }
+
+    Future<SearchFeedbackTransport> prepare(http.Client client) async {
+      identity.registeredKeyId = identity.keyId;
+      await SearchFeedbackIdentityStore(() async => Directory(source))
+          .save(identity);
+      await addEvents(3);
+      final transport = SearchFeedbackTransport(destination, client: client);
+      addTearDown(transport.close);
+      expect(await transport.collect(source, mayCollect: () async => true), 4);
+      return transport;
+    }
+
+    List<String> ids(http.Request request) => [
+          for (final e in (jsonDecode(request.body) as Map)['events'] as List)
+            (e as Map)['eventId'] as String,
+        ];
+
+    test('החצאים נשלחים באותו סבב, בלי אובדן ובלי כפילות', () async {
+      final delivered = <String>[];
+      var requests = 0;
+      final transport = await prepare(MockClient((request) async {
+        requests++;
+        final batch = ids(request);
+        if (batch.length > 2) {
+          return http.Response('{"error":"too_large"}', 413);
+        }
+        delivered.addAll(batch);
+        return http.Response('{"accepted":${batch.length}}', 200);
+      }));
+
+      expect(await transport.upload(), (sent: 4, rejected: 0, remaining: 0));
+      expect(requests, 3);
+      expect(delivered..sort(),
+          ['extra-0', 'extra-1', 'extra-2', 'test-event-id']);
+      expect(await transport.count(), 0);
+    });
+
+    test('כשל זמני אחרי הצלחה חלקית: נשמר רק מה שטרם אושר, והמשך בלי כפילות',
+        () async {
+      final delivered = <String>[];
+      var failSecond = true;
+      final transport = await prepare(MockClient((request) async {
+        final batch = ids(request);
+        if (batch.length > 2) {
+          return http.Response('{"error":"too_large"}', 413);
+        }
+        if (failSecond && delivered.isNotEmpty) {
+          return http.Response('{"error":"rate_limited"}', 429,
+              headers: {'retry-after': '120'});
+        }
+        delivered.addAll(batch);
+        return http.Response('{"accepted":${batch.length}}', 200);
+      }));
+
+      expect(await transport.upload(), (sent: 2, rejected: 0, remaining: 2));
+      expect(delivered, hasLength(2));
+      expect(await transport.upload(), (sent: 0, rejected: 0, remaining: 2));
+
+      failSecond = false;
+      await File(p.join(destination, 'retry-at.txt')).writeAsString(
+          DateTime.now()
+              .subtract(const Duration(seconds: 1))
+              .toUtc()
+              .toIso8601String());
+      expect(await transport.upload(), (sent: 2, rejected: 0, remaining: 0));
+      expect(delivered..sort(),
+          ['extra-0', 'extra-1', 'extra-2', 'test-event-id']);
+    });
+
+    test('שרת שדוחה כל גודל: הפיצול נעצר, ואירוע בודד נספר כנדחה', () async {
+      var requests = 0;
+      final transport = await prepare(MockClient((request) async {
+        requests++;
+        return http.Response('{"error":"too_large"}', 413);
+      }));
+
+      expect(await transport.upload(), (sent: 0, rejected: 4, remaining: 0));
+      expect(requests, lessThan(20));
+      expect(await transport.count(), 0);
+    });
+  });
+
   for (final contents in ['{"delaySec', '[1]', '{"delaySeconds":"x"}']) {
     test('corrupt filter backoff $contents still defers the next attempt',
         () async {

@@ -1,11 +1,19 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:error_reports_manager/error_reports_manager.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:launcher_app/src/app_report/launcher_crash_session.dart';
+import 'package:launcher_app/src/controllers/error_reports_controller.dart';
 import 'package:launcher_app/src/controllers/launcher_update_controller.dart';
 import 'package:launcher_app/src/controllers/library_module_controller.dart';
 import 'package:launcher_app/src/controllers/otzaria_module_controller.dart';
+import 'package:launcher_app/src/controllers/search_feedback_controller.dart';
 import 'package:launcher_app/src/screens/app_shell.dart';
 import 'package:launcher_app/src/screens/custom_apps/custom_apps_settings_card.dart';
 import 'package:launcher_app/src/screens/faq/faq_floating_button.dart';
@@ -13,6 +21,7 @@ import 'package:launcher_app/src/screens/home_screen.dart';
 import 'package:launcher_app/src/screens/library_screen.dart';
 import 'package:launcher_app/src/screens/otzaria_screen.dart';
 import 'package:launcher_app/src/screens/plugins/plugins_screen.dart';
+import 'package:launcher_app/src/screens/reports_upload_section.dart';
 import 'package:launcher_app/src/screens/settings_screen.dart';
 import 'package:launcher_app/src/services/app_logger.dart';
 import 'package:launcher_app/src/services/mirror_download_undo.dart';
@@ -62,6 +71,8 @@ void main() {
     bool readOnly = false,
     bool driveFull = false,
     SleepInhibitor? sleepInhibitor,
+    SearchFeedbackController? searchFeedback,
+    ErrorReportsController? errorReports,
   }) async {
     useViewSize(tester, const Size(1400, 1000));
     await tester.pumpWidget(
@@ -73,6 +84,8 @@ void main() {
           readOnly: readOnly,
           driveFull: driveFull,
           sleepInhibitor: sleepInhibitor,
+          searchFeedback: searchFeedback,
+          errorReports: errorReports,
           // ברירת המחדל: ההסבר החד-פעמי כבר הוצג, כדי שלא יצוץ באמצע בדיקה
           // שאינה שלו.
           noticesStore: notices ??
@@ -642,6 +655,7 @@ void main() {
         'class _NavRail',
       );
       expect(host, contains('wouldInterrupt => _shell._exitWouldInterrupt'));
+      expect(host, contains('_shell._searchFeedback.stopAndWait()'));
       expect(host, contains('_shell._blockedByReadOnly()'));
       expect(host, contains('isReadOnly => _shell.widget.readOnly'));
       final flow = bodyOf(
@@ -658,6 +672,364 @@ void main() {
       );
       expect(body, contains('CancelledDownloadRollback.capture('));
       expect(body, contains('mirrorDirs: downloadMirrorDirs'));
+    });
+  });
+
+  group('משוב החיפוש: איסוף והעלאה ברקע, בלי ממשק', () {
+    late _ShellFeedback transport;
+    late List<String> snacks;
+    DebugPrintCallback? previousPrint;
+
+    setUp(() {
+      transport = _ShellFeedback();
+      snacks = [];
+      previousPrint = debugPrint;
+      debugPrint = (message, {wrapWidth}) {
+        if (message?.startsWith('UiSnack') ?? false) snacks.add(message!);
+      };
+    });
+
+    // נבדק בסוף גוף הבדיקה, לפני tearDown — לכן משוחזר כאן.
+    void restorePrint() => debugPrint = previousPrint!;
+
+    SearchFeedbackController feedbackFor(_MutableLocator locator) =>
+        SearchFeedbackController(
+          transport: transport,
+          resolveSource: () async {
+            final probe = await locator.probe();
+            return probe.isRunning || !transport.consent ? null : 'source';
+          },
+        );
+
+    Future<void> settle(WidgetTester tester, bool Function() done) async {
+      for (var i = 0; i < 40 && !done(); i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+    }
+
+    void expectSilent(WidgetTester tester) {
+      restorePrint();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(snacks, isEmpty);
+      expect(find.text(stringsOf().errorReports.uploadButton(2)), findsNothing);
+      expect(
+        find.textContaining(stringsOf().errorReports.uploadPendingOffline(2)),
+        findsNothing,
+      );
+      expect(
+        find.textContaining(stringsOf().errorReports.uploadPendingUnchecked(2)),
+        findsNothing,
+      );
+    }
+
+    testWidgets('בעלייה, גם כשהבדיקה האוטומטית כבויה: נאסף ומועלה בלי לחיצה', (
+      tester,
+    ) async {
+      final locator = _MutableLocator(isRunning: false);
+      await pumpShell(
+        tester,
+        locator: locator,
+        searchFeedback: feedbackFor(locator),
+      );
+      await settle(tester, () => transport.uploads > 0);
+
+      expect(transport.collections, 1);
+      expect(transport.uploads, 1);
+      expect(settings.settings.autoCheckUpdates, isFalse);
+      expect(transport.sent, 2);
+      expectSilent(tester);
+    });
+
+    testWidgets('אינו ממתין להסבר הדיווחים הפתוח ואינו מופיע בו', (
+      tester,
+    ) async {
+      final locator = _MutableLocator(isRunning: false);
+      await pumpShell(
+        tester,
+        locator: locator,
+        notices: MemoryNoticesStore(),
+        searchFeedback: feedbackFor(locator),
+      );
+      await settle(tester, () => transport.uploads > 0);
+
+      restorePrint();
+      expect(
+          find.text(stringsOf().errorReports.introDialogTitle), findsOneWidget);
+      expect(transport.sent, 2);
+      expect(snacks, isEmpty);
+    });
+
+    testWidgets('בלי הסכמה באוצריא אין איסוף ואין העלאה', (tester) async {
+      transport.consent = false;
+      final locator = _MutableLocator(isRunning: false);
+      await pumpShell(
+        tester,
+        locator: locator,
+        searchFeedback: feedbackFor(locator),
+      );
+      await settle(tester, () => false);
+
+      expect(transport.collections, 0);
+      expect(transport.uploads, 0);
+      expect(transport.sourceEvents, 2);
+      expectSilent(tester);
+    });
+
+    testWidgets('אוצריא פתוחה: ממתין, ואוסף מעצמו כשהיא נסגרת', (tester) async {
+      final locator = _MutableLocator(isRunning: true);
+      await pumpShell(
+        tester,
+        locator: locator,
+        searchFeedback: feedbackFor(locator),
+      );
+      await settle(tester, () => false);
+      expect(transport.collections, 0);
+      expect(transport.sourceEvents, 2);
+
+      locator.isRunning = false;
+      await tester.pump(const Duration(seconds: 4));
+      await settle(tester, () => transport.uploads > 0);
+
+      expect(transport.collections, 1);
+      expect(transport.sent, 2);
+      expectSilent(tester);
+    });
+
+    testWidgets('כונן לקריאה בלבד: אין איסוף, העלאה או כתיבה, ואין הודעה', (
+      tester,
+    ) async {
+      transport.carriedEvents = 3;
+      final locator = _MutableLocator(isRunning: false);
+      await pumpShell(
+        tester,
+        locator: locator,
+        readOnly: true,
+        searchFeedback: feedbackFor(locator),
+      );
+      await settle(tester, () => false);
+      locator.isRunning = true;
+      await tester.runAsync(
+        () => tester
+            .widget<HomeScreen>(screen(HomeScreen))
+            .otzaria
+            .refreshRunningState(force: true),
+      );
+      await tester.pump();
+      locator.isRunning = false;
+      await tester.pump(const Duration(seconds: 4));
+      await settle(tester, () => false);
+
+      expect(transport.collections, 0);
+      expect(transport.uploads, 0);
+      restorePrint();
+      expect(transport.counts, 0);
+      expect(snacks, isEmpty);
+    });
+
+    testWidgets('אין רשת: הנתונים נשמרים, וניסיון חוזר רק אחרי ההשהיה', (
+      tester,
+    ) async {
+      transport.online = false;
+      final locator = _MutableLocator(isRunning: false);
+      await pumpShell(
+        tester,
+        locator: locator,
+        searchFeedback: feedbackFor(locator),
+      );
+      await settle(tester, () => transport.uploads > 0);
+      expect(transport.uploads, 1);
+      expect(transport.carriedEvents, 2);
+
+      await tester.pump(const Duration(minutes: 1));
+      await settle(tester, () => false);
+      expect(transport.uploads, 1);
+
+      transport.online = true;
+      await tester.pump(const Duration(minutes: 2));
+      await settle(tester, () => transport.uploads > 1);
+      expect(transport.uploads, 2);
+      expect(transport.carriedEvents, 0);
+      expectSilent(tester);
+    });
+
+    testWidgets('פירוק המסגרת מבטל את הניסיון החוזר', (tester) async {
+      transport.online = false;
+      final locator = _MutableLocator(isRunning: false);
+      await pumpShell(
+        tester,
+        locator: locator,
+        searchFeedback: feedbackFor(locator),
+      );
+      await settle(tester, () => transport.uploads > 0);
+      await tester.pumpWidget(const SizedBox.shrink());
+      transport.online = true;
+      await tester.pump(const Duration(hours: 1));
+      restorePrint();
+      expect(transport.uploads, 1);
+      expect(transport.closed, isTrue);
+    });
+  });
+
+  group('דיווחי הטעויות לצד משוב החיפוש', () {
+    final t = stringsOf().errorReports;
+    late _ShellFeedback transport;
+    late _ShellReportQueue queue;
+    late ErrorReportsController reports;
+
+    setUp(() {
+      transport = _ShellFeedback();
+      queue = _ShellReportQueue();
+      reports = ErrorReportsController(
+        outbox: queue.outbox,
+        resolveQueue: () async => queue,
+      );
+    });
+
+    SearchFeedbackController feedbackFor(_MutableLocator locator) =>
+        SearchFeedbackController(
+          transport: transport,
+          resolveSource: () async {
+            final probe = await locator.probe();
+            return probe.isRunning ? null : 'source';
+          },
+        );
+
+    Future<void> settle(WidgetTester tester, bool Function() done) async {
+      for (var i = 0; i < 120 && !done(); i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+    }
+
+    Future<void> pumpBoth(WidgetTester tester, _MutableLocator locator) async {
+      await pumpShell(
+        tester,
+        locator: locator,
+        errorReports: reports,
+        searchFeedback: feedbackFor(locator),
+      );
+      tester.widget<HomeScreen>(screen(HomeScreen)).otzaria.launchPath = 'x';
+    }
+
+    Future<void> openAndClose(
+      WidgetTester tester,
+      _MutableLocator locator,
+    ) async {
+      final otzaria = tester.widget<HomeScreen>(screen(HomeScreen)).otzaria;
+      locator.isRunning = true;
+      await tester.runAsync(() => otzaria.refreshRunningState(force: true));
+      await tester.pump();
+      expect(otzaria.isRunning, isTrue);
+      locator.isRunning = false;
+      await tester.pump(const Duration(seconds: 4));
+      await settle(tester, () => false);
+    }
+
+    final dialog = find.text(t.collectDialogTitle);
+
+    testWidgets('שני מחזורים: סירוב, איסוף מוצלח, ואז דיווח בודד מוצע', (
+      tester,
+    ) async {
+      final locator = _MutableLocator(isRunning: true);
+      await pumpBoth(tester, locator);
+      queue.pending = 3;
+      transport.sourceEvents = 2;
+
+      locator.isRunning = false;
+      await tester.pump(const Duration(seconds: 4));
+      await settle(tester, () => dialog.evaluate().isNotEmpty);
+      expect(dialog, findsOneWidget);
+      expect(find.text(t.collectDialogContent(3)), findsOneWidget);
+      await tester.tap(find.text(t.collectLater));
+      await settle(tester, () => dialog.evaluate().isEmpty);
+      expect(queue.outbox.reports, isEmpty);
+      expect(transport.sent, 2);
+
+      queue.pending = 4;
+      transport.sourceEvents = 1;
+      await openAndClose(tester, locator);
+      await settle(tester, () => dialog.evaluate().isNotEmpty);
+      expect(dialog, findsOneWidget);
+      expect(find.text(t.collectDialogContent(4)), findsOneWidget);
+      await tester.tap(find.text(t.collectConfirm));
+      await settle(tester, () => queue.outbox.reports.length == 4);
+      expect(queue.outbox.reports, hasLength(4));
+      expect(queue.pending, 0);
+      expect(transport.sent, 3);
+
+      queue.pending = 1;
+      await openAndClose(tester, locator);
+      await settle(tester, () => dialog.evaluate().isNotEmpty);
+      expect(dialog, findsOneWidget);
+      expect(find.text(t.collectDialogContent(1)), findsOneWidget);
+      await tester.tap(find.text(t.collectConfirm));
+      await settle(tester, () => queue.outbox.reports.length == 5);
+      expect(queue.outbox.reports, hasLength(5));
+      expect(queue.collects, 2);
+    });
+
+    testWidgets('משוב לבדו: בלי דיאלוג, כפתור, טקסט המתנה או סיכום דיווחים', (
+      tester,
+    ) async {
+      final locator = _MutableLocator(isRunning: false);
+      await pumpBoth(tester, locator);
+      await settle(tester, () => transport.uploads > 0);
+
+      expect(transport.sent, 2);
+      expect(queue.collects, 0);
+      expect(dialog, findsNothing);
+      expect(find.byType(ReportsUploadSection), findsOneWidget);
+      expect(find.text(t.uploadButton(2)), findsNothing);
+      expect(find.textContaining(t.uploadPendingOffline(2)), findsNothing);
+      expect(find.textContaining(t.uploadPendingUnchecked(2)), findsNothing);
+      expect(reports.outboxCount, 0);
+    });
+
+    testWidgets('העלאת משוב שנתקעה אינה מונעת הצעת דיווחים, ללא כפילות', (
+      tester,
+    ) async {
+      final gate = Completer<void>();
+      transport.uploadGate = gate;
+      final locator = _MutableLocator(isRunning: false);
+      await pumpBoth(tester, locator);
+      queue.pending = 2;
+      await settle(tester, () => transport.uploads > 0);
+      expect(transport.uploads, 1);
+
+      await openAndClose(tester, locator);
+      await settle(tester, () => dialog.evaluate().isNotEmpty);
+      expect(dialog, findsOneWidget);
+      expect(transport.uploads, 1);
+      expect(transport.collections, 1);
+
+      gate.complete();
+      await tester.tap(find.text(t.collectLater));
+      await settle(tester, () => transport.sent > 0);
+      expect(transport.sent, 2);
+      expect(transport.uploads, 1);
+    });
+
+    testWidgets('פירוק בזמן העלאת משוב: אין פעילות אחריו', (tester) async {
+      final gate = Completer<void>();
+      transport.uploadGate = gate;
+      final locator = _MutableLocator(isRunning: false);
+      await pumpBoth(tester, locator);
+      await settle(tester, () => transport.uploads > 0);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      gate.complete();
+      transport.online = false;
+      await settle(tester, () => false);
+      await tester.pump(const Duration(hours: 1));
+      expect(transport.uploads, 1);
+      expect(transport.collections, 1);
+      expect(transport.closed, isTrue);
+      expect(tester.takeException(), isNull);
     });
   });
 
@@ -698,8 +1070,10 @@ void main() {
     test('כוללות איסוף והעלאה של דיווחים', () {
       expect(getters, contains('_errorReports.isCollecting'));
       expect(getters, contains('_errorReports.isUploading'));
-      expect(getters, contains('_searchFeedback.isCollecting'));
-      expect(getters, contains('_searchFeedback.isUploading'));
+      final interrupt = getters.substring(
+        getters.indexOf('bool get _exitWouldInterrupt'),
+      );
+      expect(interrupt, isNot(contains('_searchFeedback')));
     });
   });
 
@@ -752,6 +1126,13 @@ void main() {
         body.substring(afterDialog, restart),
         contains('_offeredElevation = false'),
       );
+    });
+
+    test('משוב ברקע נעצר בסדר אחרי האישור, לפני בדיקת החסימה', () {
+      final dialog = body.indexOf('showTwoActionsDialog');
+      final stop = body.indexOf('_searchFeedback.stopAndWait()', dialog);
+      expect(stop, greaterThan(dialog));
+      expect(stop, lessThan(body.indexOf('_exitWouldInterrupt', dialog)));
     });
 
     test('מסמנת המתנה ל-UAC סביב restartElevated ומאפסת בכשל', () {
@@ -1050,4 +1431,127 @@ class _MutableLocator extends RunningOtzariaLocator {
 
   @override
   Future<bool?> waitForExit(Duration timeout) async => null;
+}
+
+/// תור משוב בזיכרון לבדיקות המסגרת — בלי דיסק ובלי רשת.
+class _ShellFeedback extends SearchFeedbackTransport {
+  _ShellFeedback()
+      : super('unused',
+            client: MockClient((_) async => http.Response('{}', 200)));
+
+  bool consent = true;
+  bool online = true;
+  bool closed = false;
+  int sourceEvents = 2;
+  int carriedEvents = 0;
+  int collections = 0;
+  int uploads = 0;
+  int counts = 0;
+  int sent = 0;
+  DateTime? storedRetryAt;
+  Completer<void>? uploadGate;
+
+  @override
+  Future<int> pendingForCollection(String sourceDirectory) async =>
+      sourceEvents;
+
+  @override
+  Future<int> count() async {
+    counts++;
+    return carriedEvents;
+  }
+
+  @override
+  Future<int> collect(String sourceDirectory,
+      {required Future<bool> Function() mayCollect}) async {
+    collections++;
+    if (!await mayCollect()) return 0;
+    final collected = sourceEvents;
+    carriedEvents += collected;
+    sourceEvents = 0;
+    return collected;
+  }
+
+  @override
+  Future<DateTime?> retryAt() async => storedRetryAt;
+
+  @override
+  Future<SearchFeedbackUploadResult> upload() async {
+    uploads++;
+    await uploadGate?.future;
+    if (!online) {
+      storedRetryAt = DateTime.now().add(const Duration(minutes: 2));
+      return (sent: 0, rejected: 0, remaining: carriedEvents);
+    }
+    sent += carriedEvents;
+    carriedEvents = 0;
+    storedRetryAt = null;
+    return (sent: sent, rejected: 0, remaining: 0);
+  }
+
+  @override
+  void close() {
+    closed = true;
+    super.close();
+  }
+}
+
+/// תור הדיווחים של אוצריא בזיכרון: איסוף מעביר את [pending] ל-[outbox].
+class _ShellReportQueue implements OtzariaReportQueue {
+  final outbox = _ShellOutbox();
+  int pending = 0;
+  int collects = 0;
+
+  @override
+  Future<int> countSendable() async => pending;
+
+  @override
+  Future<QueueCollectResult> collectTo(ReportOutbox outbox) async {
+    collects++;
+    final n = pending;
+    for (var i = 0; i < n; i++) {
+      await outbox.write(
+        'r${this.outbox.reports.length}',
+        utf8.encode(jsonEncode(OutboxReport.fileJson(
+          reportId: 'r${this.outbox.reports.length}',
+          bookTitle: 'ספר',
+          createdAt: '2026-09-01T10:00:00Z',
+          body: const {},
+        ))),
+      );
+    }
+    pending = 0;
+    return (collected: n, error: null);
+  }
+}
+
+class _ShellOutbox implements ReportOutbox {
+  final reports = <OutboxReport>[];
+
+  @override
+  Future<List<OutboxReport>> list() async => List.of(reports);
+
+  @override
+  Future<int> count() async => reports.length;
+
+  @override
+  Future<Uint8List> requestBody(OutboxReport report) async =>
+      Uint8List.fromList(utf8.encode('{}'));
+
+  @override
+  Future<void> remove(OutboxReport report) async =>
+      reports.removeWhere((r) => r.reportId == report.reportId);
+
+  @override
+  Future<void> write(String reportId, Uint8List fileBytes) async {
+    reports.removeWhere((r) => r.reportId == reportId);
+    reports.add(OutboxReport.fromJson(
+      jsonDecode(utf8.decode(fileBytes)) as Map<String, dynamic>,
+      filePath: reportId,
+    ));
+  }
+
+  @override
+  Future<void> discard(String reportId) async =>
+      reports.removeWhere((r) => r.reportId == reportId);
 }

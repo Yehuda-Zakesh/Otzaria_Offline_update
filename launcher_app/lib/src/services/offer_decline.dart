@@ -6,4 +6,6 @@ class OfferDecline {
   }
 
   void mark(int count) => _declined = count;
+
+  void reset() => _declined = 0;
 }

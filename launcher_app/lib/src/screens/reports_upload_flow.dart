@@ -2,17 +2,15 @@ import 'package:flutter/widgets.dart';
 import 'package:otzaria_l10n/otzaria_l10n.dart';
 
 import '../controllers/error_reports_controller.dart';
-import '../controllers/search_feedback_controller.dart';
 import '../services/app_logger.dart';
 import '../widgets/widgets_exports.dart';
 
 Future<bool> _confirmUploads(
   BuildContext context, {
-  required ErrorReportsController? errorReports,
+  required ErrorReportsController errorReports,
   required int reportCount,
-  required int feedbackCount,
 }) async {
-  if (errorReports != null && reportCount > errorReports.batchSize) {
+  if (reportCount > errorReports.batchSize) {
     final t = context.strings.errorReports;
     final approved = await showTwoActionsDialog(
       context: context,
@@ -25,15 +23,6 @@ Future<bool> _confirmUploads(
       confirmText: t.uploadLongDialogConfirm,
     );
     if (!approved || !context.mounted) return false;
-  }
-  if (feedbackCount > 0) {
-    final t = context.strings.libraryDomain;
-    return showTwoActionsDialog(
-      context: context,
-      title: t.semanticFeedbackUploadTitle,
-      content: t.semanticFeedbackUploadBody(feedbackCount),
-      confirmText: t.semanticFeedbackUploadAction,
-    );
   }
   return true;
 }
@@ -53,105 +42,57 @@ class ReportsUploadOutcome {
       };
 }
 
+/// משוב החיפוש אינו כאן: הוא עולה ברקע בלי ממשק (`SearchFeedbackAutoSync`).
 Future<ReportsUploadOutcome?> uploadAllReports(
   BuildContext context, {
   ErrorReportsController? errorReports,
-  SearchFeedbackController? searchFeedback,
   void Function(bool active)? onActiveChanged,
   void Function(bool uploading)? onUploadingChanged,
-  bool Function()? isCancelled,
 }) async {
-  if ((errorReports?.isUploading ?? false) ||
-      (searchFeedback?.isUploading ?? false)) {
-    return null;
-  }
-  if ((errorReports?.isCollecting ?? false) ||
-      (searchFeedback?.isCollecting ?? false)) {
+  if (errorReports == null || errorReports.isUploading) return null;
+  if (errorReports.isCollecting) {
     UiSnack.show(AppL10n.strings.errorReports.uploadCollectingBusy);
     return null;
   }
   var announced = false;
   onActiveChanged?.call(true);
   try {
-    await searchFeedback?.refreshOutbox();
-    final reportCount = errorReports?.outboxCount ?? 0;
-    final feedbackCount = searchFeedback?.outboxCount ?? 0;
-    if (reportCount + feedbackCount <= 0 || !context.mounted) return null;
+    final reportCount = errorReports.outboxCount;
+    if (reportCount <= 0 || !context.mounted) return null;
     if (!await _confirmUploads(
       context,
       errorReports: errorReports,
       reportCount: reportCount,
-      feedbackCount: feedbackCount,
     )) {
       return null;
     }
 
     onUploadingChanged?.call(true);
     announced = true;
-    final lines = <String>[];
-    var failed = false;
-    var remaining = 0;
     final s = AppL10n.strings.errorReports;
-    final libraryStrings = AppL10n.strings.libraryDomain;
-
-    var reportsHalted = false;
-    if (errorReports != null && reportCount > 0) {
-      final result = await errorReports.upload();
-      if (result == null) {
-        lines.add(s.uploadCollectingBusy);
-        remaining += reportCount;
-        reportsHalted = true;
-      } else {
-        final error = result.error;
-        if (error != null) lines.add(s.uploadFailedSnack(error));
-        if (error == null || result.total > 0) {
-          lines.add(
-            s.uploadSummary(result.sent, result.rejected, result.remaining),
-          );
-        }
-        failed = error != null;
-        remaining += result.remaining;
-        reportsHalted = result.cancelled || failed;
-      }
+    final result = await errorReports.upload();
+    final ReportsUploadOutcome outcome;
+    if (result == null) {
+      outcome = ReportsUploadOutcome(
+        s.uploadCollectingBusy,
+        ReportsUploadSeverity.info,
+      );
+    } else {
+      final error = result.error;
+      final lines = [
+        if (error != null) s.uploadFailedSnack(error),
+        if (error == null || result.total > 0)
+          s.uploadSummary(result.sent, result.rejected, result.remaining),
+      ];
+      outcome = ReportsUploadOutcome(
+        lines.join('\n'),
+        error != null
+            ? ReportsUploadSeverity.error
+            : result.remaining > 0
+                ? ReportsUploadSeverity.info
+                : ReportsUploadSeverity.success,
+      );
     }
-
-    if (searchFeedback != null &&
-        feedbackCount > 0 &&
-        !reportsHalted &&
-        !(isCancelled?.call() ?? false)) {
-      try {
-        final result = await searchFeedback.upload();
-        if (result == null) {
-          lines.add(s.uploadCollectingBusy);
-          remaining += feedbackCount;
-        } else {
-          lines.add(
-            libraryStrings.semanticFeedbackUploaded(
-              result.sent,
-              result.remaining,
-            ),
-          );
-          remaining += result.remaining;
-        }
-      } catch (error) {
-        AppLogger.maybeInstance?.error('העלאת משוב החיפוש נכשלה', error);
-        lines.add(libraryStrings.semanticFeedbackFailed);
-        failed = true;
-      }
-    } else if (searchFeedback != null && feedbackCount > 0) {
-      lines.add(libraryStrings.semanticFeedbackUploaded(0, feedbackCount));
-      remaining += feedbackCount;
-    }
-
-    if (lines.isEmpty) return null;
-    final outcome = ReportsUploadOutcome(
-      lines.join('\n'),
-      failed
-          ? ReportsUploadSeverity.error
-          : remaining > 0
-              ? ReportsUploadSeverity.info
-              : ReportsUploadSeverity.success,
-    );
     outcome.show();
     return outcome;
   } catch (error) {

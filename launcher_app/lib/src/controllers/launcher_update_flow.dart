@@ -25,6 +25,9 @@ abstract interface class LauncherUpdateHost {
   bool get isReadOnly;
   bool blockedByReadOnly();
   bool get wouldInterrupt;
+
+  /// עוצר בסדר עבודת רקע שאינה מצדיקה סירוב (משוב החיפוש), לפני [wouldInterrupt].
+  Future<void> settleBackgroundWork();
   Future<bool> confirmInstall(String version);
   void notify(LauncherUpdateNotice notice, {String? detail});
 }
@@ -76,6 +79,8 @@ class LauncherUpdateFlow {
   Future<void> install() async {
     if (host.blockedByReadOnly()) return;
     if (!host.isActive) return;
+    await host.settleBackgroundWork();
+    if (!host.isActive) return;
     if (host.wouldInterrupt) {
       host.notify(LauncherUpdateNotice.busy);
       return;
@@ -85,6 +90,8 @@ class LauncherUpdateFlow {
 
     final approved = await host.confirmInstall(version);
     if (!approved || !host.isActive) return;
+    await host.settleBackgroundWork();
+    if (!host.isActive) return;
     if (host.wouldInterrupt) {
       host.notify(LauncherUpdateNotice.busy);
       return;

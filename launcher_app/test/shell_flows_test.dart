@@ -272,6 +272,15 @@ class _FakeLauncherHost implements LauncherUpdateHost {
   @override
   bool blockedByReadOnly() => isReadOnly;
 
+  int settles = 0;
+  void Function()? onSettle;
+
+  @override
+  Future<void> settleBackgroundWork() async {
+    settles++;
+    onSettle?.call();
+  }
+
   @override
   Future<bool> confirmInstall(String version) async {
     log.add('confirm $version');
@@ -779,6 +788,25 @@ void main() {
       launcherHost.wouldInterrupt = true;
       await launcherFlow.install();
       expect(log, ['busy']);
+    });
+
+    test('background work that stops in order does not refuse the install',
+        () async {
+      launcherHost
+        ..wouldInterrupt = true
+        ..onSettle = () => launcherHost.wouldInterrupt = false;
+      await launcherFlow.install();
+      expect(log, ['confirm 2.0.0', 'installing', 'launcher install']);
+      expect(launcherHost.settles, 2);
+    });
+
+    test('background work started during the dialog is stopped again',
+        () async {
+      launcherHost
+        ..whileDialogOpen = (() => launcherHost.wouldInterrupt = true)
+        ..onSettle = () => launcherHost.wouldInterrupt = false;
+      await launcherFlow.install();
+      expect(log, ['confirm 2.0.0', 'installing', 'launcher install']);
     });
 
     test('install checks again after the confirmation dialog', () async {

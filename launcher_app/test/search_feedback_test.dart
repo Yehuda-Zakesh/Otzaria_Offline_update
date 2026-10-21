@@ -2,23 +2,15 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:error_reports_manager/error_reports_manager.dart';
-import 'package:flutter/material.dart';
+import 'package:fake_async/fake_async.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:launcher_app/src/controllers/launcher_update_controller.dart';
-import 'package:launcher_app/src/controllers/library_module_controller.dart';
-import 'package:launcher_app/src/controllers/otzaria_module_controller.dart';
-import 'package:launcher_app/src/controllers/plugins_module_controller.dart';
 import 'package:launcher_app/src/controllers/search_feedback_controller.dart';
-import 'package:launcher_app/src/screens/home_screen.dart';
-import 'package:launcher_app/src/screens/reports_upload_flow.dart';
-import 'package:launcher_app/src/screens/search_feedback_flow.dart';
-import 'package:launcher_app/src/settings/settings_controller.dart';
+import 'package:launcher_app/src/services/search_feedback_auto_sync.dart';
 import 'package:otzaria_manager/otzaria_manager.dart';
 import 'package:path/path.dart' as p;
-
-import 'test_harness.dart';
 
 /// תור קיים בזיכרון: בדיקות הזרימה אינן תלויות בדיסק או בשרת.
 class _MemoryFeedback extends SearchFeedbackTransport {
@@ -28,11 +20,17 @@ class _MemoryFeedback extends SearchFeedbackTransport {
 
   int sourceEvents = 2;
   int carriedEvents = 0;
+  int collections = 0;
   int uploads = 0;
+  bool online = true;
+  bool throwOnCollect = false;
+  bool throwOnUpload = false;
+  DateTime? storedRetryAt;
+  Duration? offlineRetry = const Duration(minutes: 2);
+  Completer<void>? uploadGate;
+  Completer<void>? collectGate;
+  bool stopped = false;
   int stops = 0;
-
-  @override
-  Future<int> pending(String sourceDirectory) async => sourceEvents;
 
   @override
   Future<int> pendingForCollection(String sourceDirectory) async =>
@@ -44,6 +42,9 @@ class _MemoryFeedback extends SearchFeedbackTransport {
   @override
   Future<int> collect(String sourceDirectory,
       {required Future<bool> Function() mayCollect}) async {
+    collections++;
+    if (throwOnCollect) throw const FileSystemException('drive full');
+    await collectGate?.future;
     if (!await mayCollect()) return 0;
     final collected = sourceEvents;
     carriedEvents += collected;
@@ -52,15 +53,32 @@ class _MemoryFeedback extends SearchFeedbackTransport {
   }
 
   @override
-  Future<SearchFeedbackUploadResult> upload() async {
-    uploads++;
-    return (sent: carriedEvents, rejected: 0, remaining: 0);
-  }
+  Future<DateTime?> retryAt() async => storedRetryAt;
 
   @override
   void stop() {
+    stopped = true;
     stops++;
-    super.stop();
+    final gate = uploadGate;
+    if (gate != null && !gate.isCompleted) gate.complete();
+  }
+
+  @override
+  Future<SearchFeedbackUploadResult> upload() async {
+    uploads++;
+    stopped = false;
+    await uploadGate?.future;
+    if (stopped) return (sent: 0, rejected: 0, remaining: carriedEvents);
+    if (throwOnUpload) throw StateError('boom');
+    if (!online) {
+      final delay = offlineRetry;
+      storedRetryAt = delay == null ? null : DateTime.now().add(delay);
+      return (sent: 0, rejected: 0, remaining: carriedEvents);
+    }
+    final sent = carriedEvents;
+    carriedEvents = 0;
+    storedRetryAt = null;
+    return (sent: sent, rejected: 0, remaining: 0);
   }
 }
 
@@ -72,72 +90,403 @@ class _RunningOtzaria extends RunningOtzariaLocator {
       (isRunning: true, launchPath: null);
 }
 
-Future<BuildContext> _host(WidgetTester tester) async {
-  late BuildContext context;
-  await pumpScreen(
-    tester,
-    Scaffold(body: Builder(builder: (value) {
-      context = value;
-      return const SizedBox.shrink();
-    })),
-  );
-  return context;
-}
-
 void main() {
-  final strings = stringsOf();
   late _MemoryFeedback transport;
   late SearchFeedbackController controller;
   var consent = true;
+  var otzariaOpen = false;
+  late List<String> printed;
+  DebugPrintCallback? previousPrint;
 
   setUp(() {
     consent = true;
+    otzariaOpen = false;
     transport = _MemoryFeedback();
     controller = SearchFeedbackController(
       transport: transport,
-      resolveSource: () async => consent ? 'source' : null,
+      resolveSource: () async => consent && !otzariaOpen ? 'source' : null,
     );
+    printed = [];
+    previousPrint = debugPrint;
+    debugPrint = (message, {wrapWidth}) => printed.add(message ?? '');
   });
 
-  tearDown(() => controller.dispose());
-
-  testWidgets('empty feedback does not show a collection offer',
-      (tester) async {
-    transport.sourceEvents = 0;
-    final context = await _host(tester);
-    await offerSearchFeedbackCollection(context, controller);
-    await tester.pumpAndSettle();
-    expect(find.text(strings.libraryDomain.semanticFeedbackCollectTitle),
-        findsNothing);
+  tearDown(() {
+    debugPrint = previousPrint!;
+    controller.dispose();
   });
 
-  testWidgets('declining collection keeps source and does not offer again',
-      (tester) async {
-    final context = await _host(tester);
-    unawaited(offerSearchFeedbackCollection(context, controller));
-    await tester.pumpAndSettle();
-    expect(find.text(strings.libraryDomain.semanticFeedbackCollectTitle),
-        findsOneWidget);
-    await tester.tap(find.text(strings.errorReports.collectLater));
-    await tester.pumpAndSettle();
-    expect(transport.sourceEvents, 2);
-    expect(transport.carriedEvents, 0);
-    unawaited(offerSearchFeedbackCollection(context, controller));
-    await tester.pumpAndSettle();
-    expect(find.text(strings.libraryDomain.semanticFeedbackCollectTitle),
-        findsNothing);
+  group('synchronize — no prompt, no message', () {
+    test('collects available feedback and uploads it in one run', () async {
+      expect(await controller.synchronize(), isNull);
+      expect(transport.collections, 1);
+      expect(transport.uploads, 1);
+      expect(transport.sourceEvents, 0);
+      expect(transport.carriedEvents, 0);
+      expect(printed.where((m) => m.startsWith('UiSnack')), isEmpty);
+    });
+
+    test('uploads what the drive already carries with nothing to collect',
+        () async {
+      transport
+        ..sourceEvents = 0
+        ..carriedEvents = 3;
+      expect(await controller.synchronize(), isNull);
+      expect(transport.collections, 0);
+      expect(transport.uploads, 1);
+      expect(transport.carriedEvents, 0);
+    });
+
+    test('without consent nothing is collected or sent', () async {
+      consent = false;
+      expect(await controller.synchronize(), isNull);
+      expect(transport.collections, 0);
+      expect(transport.uploads, 0);
+      expect(transport.sourceEvents, 2);
+    });
+
+    test('carried feedback uploads without Otzaria on the online PC', () async {
+      transport.carriedEvents = 3;
+      final onlineController = SearchFeedbackController(
+        transport: transport,
+        resolveSource: () async => null,
+        consentState: () async => SearchFeedbackConsent.unknown,
+      );
+      expect(await onlineController.synchronize(), isNull);
+      expect(transport.collections, 0);
+      expect(transport.uploads, 1);
+      expect(transport.carriedEvents, 0);
+    });
+
+    test('explicitly revoked consent blocks carried feedback upload', () async {
+      transport.carriedEvents = 3;
+      final onlineController = SearchFeedbackController(
+        transport: transport,
+        resolveSource: () async => null,
+        consentState: () async => SearchFeedbackConsent.revoked,
+      );
+      expect(await onlineController.synchronize(), isNull);
+      expect(transport.collections, 0);
+      expect(transport.uploads, 0);
+      expect(transport.carriedEvents, 3);
+    });
+
+    test('Otzaria open: no collection; collected once it closes', () async {
+      otzariaOpen = true;
+      expect(await controller.synchronize(), isNull);
+      expect(transport.collections, 0);
+      expect(transport.sourceEvents, 2);
+      otzariaOpen = false;
+      expect(await controller.synchronize(), isNull);
+      expect(transport.sourceEvents, 0);
+      expect(transport.uploads, 1);
+    });
+
+    test('no network keeps the data and waits for the stored backoff',
+        () async {
+      transport.online = false;
+      final delay = await controller.synchronize();
+      expect(transport.carriedEvents, 2);
+      expect(delay, isNotNull);
+      expect(delay! > const Duration(minutes: 1), isTrue);
+      expect(delay <= const Duration(minutes: 2), isTrue);
+      expect(printed.where((m) => m.startsWith('UiSnack')), isEmpty);
+
+      transport.online = true;
+      transport.storedRetryAt = null;
+      expect(await controller.synchronize(), isNull);
+      expect(transport.carriedEvents, 0);
+    });
+
+    for (final (stored, expected) in [
+      (const Duration(seconds: 1), SearchFeedbackController.minRetry),
+      (null, null),
+    ]) {
+      test('backoff $stored never becomes a tight loop', () async {
+        transport
+          ..online = false
+          ..offlineRetry = stored;
+        expect(await controller.synchronize(), expected);
+        expect(transport.carriedEvents, 2);
+      });
+    }
+
+    test('a failed upload is logged only and retried later', () async {
+      transport.throwOnUpload = true;
+      expect(
+          await controller.synchronize(), SearchFeedbackController.idleRetry);
+      expect(transport.carriedEvents, 2);
+      expect(controller.isUploading, isFalse);
+      expect(printed.where((m) => m.startsWith('UiSnack')), isEmpty);
+    });
+
+    test('a failed collection still uploads what is already carried', () async {
+      transport
+        ..throwOnCollect = true
+        ..carriedEvents = 1;
+      expect(await controller.synchronize(), isNull);
+      expect(transport.uploads, 1);
+      expect(transport.sourceEvents, 2);
+      expect(controller.isCollecting, isFalse);
+    });
+
+    test('runs never overlap', () async {
+      transport.uploadGate = Completer<void>();
+      final first = controller.synchronize();
+      await pumpEventQueue();
+      expect(controller.isUploading, isTrue);
+      expect(await controller.synchronize(), isNull);
+      expect(await controller.collect(), 0);
+      transport.uploadGate!.complete();
+      await first;
+      expect(transport.collections, 1);
+      expect(transport.uploads, 1);
+    });
+
+    test('after dispose nothing runs', () async {
+      final disposed = SearchFeedbackController(
+        transport: _MemoryFeedback(),
+        resolveSource: () async => 'source',
+      );
+      final memory = disposed.transport as _MemoryFeedback;
+      disposed.dispose();
+      expect(await disposed.synchronize(), isNull);
+      expect(memory.collections, 0);
+      expect(memory.uploads, 0);
+    });
+
+    test('an orderly stop ends the upload, keeps the queue and retries soon',
+        () async {
+      transport.uploadGate = Completer<void>();
+      final run = controller.synchronize();
+      await pumpEventQueue();
+      expect(controller.isUploading, isTrue);
+      await controller.stopAndWait();
+      expect(controller.isUploading, isFalse);
+      expect(transport.carriedEvents, 2);
+      expect(transport.storedRetryAt, isNull);
+      expect(await run, SearchFeedbackController.minRetry);
+      expect(printed.where((m) => m.startsWith('UiSnack')), isEmpty);
+    });
+
+    test('a stop during collection skips the upload', () async {
+      transport.collectGate = Completer<void>();
+      final run = controller.synchronize();
+      await pumpEventQueue();
+      expect(controller.isCollecting, isTrue);
+      final stopping = controller.stopAndWait();
+      transport.collectGate!.complete();
+      await stopping;
+      expect(await run, SearchFeedbackController.minRetry);
+      expect(transport.carriedEvents, 2);
+      expect(transport.uploads, 0);
+    });
+
+    test('a stop while counting skips the collection', () async {
+      final counting = Completer<void>();
+      final c = SearchFeedbackController(
+        transport: transport,
+        resolveSource: () async {
+          await counting.future;
+          return 'source';
+        },
+      );
+      addTearDown(c.dispose);
+      final run = c.synchronize();
+      await pumpEventQueue();
+      final stopping = c.stopAndWait();
+      counting.complete();
+      await stopping;
+      expect(await run, SearchFeedbackController.minRetry);
+      expect(transport.collections, 0);
+      expect(transport.sourceEvents, 2);
+      expect(transport.uploads, 0);
+    });
+
+    test('stopping with nothing running does nothing', () async {
+      await controller.stopAndWait();
+      expect(transport.stops, 0);
+      expect(await controller.synchronize(), isNull);
+      expect(transport.uploads, 1);
+    });
+
+    test('dispose during an upload stops the run without a retry', () async {
+      final local = _MemoryFeedback()..uploadGate = Completer<void>();
+      final c = SearchFeedbackController(
+        transport: local,
+        resolveSource: () async => 'source',
+      );
+      final run = c.synchronize();
+      await pumpEventQueue();
+      expect(c.isUploading, isTrue);
+      c.dispose();
+      expect(local.stops, 1);
+      expect(await run, isNull);
+    });
   });
 
-  test('pending offer is empty while uploading or collecting', () async {
-    expect(await controller.pendingToOffer(), 2);
-    controller.isUploading = true;
-    expect(await controller.pendingToOffer(), 0);
-    controller
-      ..isUploading = false
-      ..isCollecting = true;
-    expect(await controller.pendingToOffer(), 0);
-    controller.isCollecting = false;
-    expect(await controller.pendingToOffer(), 2);
+  group('SearchFeedbackAutoSync', () {
+    test('runs in the background and retries after the returned delay', () {
+      fakeAsync((async) {
+        final delays = <Duration?>[const Duration(minutes: 2), null];
+        var runs = 0;
+        final sync = SearchFeedbackAutoSync(
+          run: () async {
+            runs++;
+            return delays.removeAt(0);
+          },
+          isBusy: () => false,
+        );
+        unawaited(sync.request());
+        async.flushMicrotasks();
+        expect(runs, 1);
+        expect(sync.hasScheduledRetry, isTrue);
+        async.elapse(const Duration(minutes: 1, seconds: 59));
+        expect(runs, 1);
+        async.elapse(const Duration(seconds: 1));
+        expect(runs, 2);
+        expect(sync.hasScheduledRetry, isFalse);
+        async.elapse(const Duration(hours: 1));
+        expect(runs, 2);
+        sync.dispose();
+      });
+    });
+
+    test('a busy launcher defers the run until resume', () {
+      fakeAsync((async) {
+        var busy = true;
+        var runs = 0;
+        final sync = SearchFeedbackAutoSync(
+          run: () async {
+            runs++;
+            return null;
+          },
+          isBusy: () => busy,
+        );
+        unawaited(sync.request());
+        async.flushMicrotasks();
+        expect(runs, 0);
+        sync.resume();
+        async.flushMicrotasks();
+        expect(runs, 0);
+        busy = false;
+        sync.resume();
+        async.flushMicrotasks();
+        expect(runs, 1);
+        sync.dispose();
+      });
+    });
+
+    test('a retry that fires while busy waits for resume', () {
+      fakeAsync((async) {
+        var busy = false;
+        var runs = 0;
+        final sync = SearchFeedbackAutoSync(
+          run: () async {
+            runs++;
+            return runs == 1 ? const Duration(seconds: 30) : null;
+          },
+          isBusy: () => busy,
+        );
+        unawaited(sync.request());
+        async.flushMicrotasks();
+        busy = true;
+        async.elapse(const Duration(seconds: 30));
+        expect(runs, 1);
+        busy = false;
+        sync.resume();
+        async.flushMicrotasks();
+        expect(runs, 2);
+        sync.dispose();
+      });
+    });
+
+    test('Otzaria closing triggers a run; opening does not', () {
+      fakeAsync((async) {
+        var runs = 0;
+        final sync = SearchFeedbackAutoSync(
+          run: () async {
+            runs++;
+            return null;
+          },
+          isBusy: () => false,
+        );
+        sync.onRunningState(running: true);
+        async.flushMicrotasks();
+        expect(runs, 0);
+        sync.onRunningState(running: false);
+        async.flushMicrotasks();
+        expect(runs, 1);
+        sync.dispose();
+      });
+    });
+
+    test('requests during a run are coalesced, never parallel', () {
+      fakeAsync((async) {
+        final gate = Completer<void>();
+        var active = 0;
+        var maxActive = 0;
+        var runs = 0;
+        final sync = SearchFeedbackAutoSync(
+          run: () async {
+            runs++;
+            active++;
+            if (active > maxActive) maxActive = active;
+            if (runs == 1) await gate.future;
+            active--;
+            return null;
+          },
+          isBusy: () => false,
+        );
+        unawaited(sync.request());
+        unawaited(sync.request());
+        unawaited(sync.request());
+        async.flushMicrotasks();
+        gate.complete();
+        async.flushMicrotasks();
+        expect(maxActive, 1);
+        expect(runs, 2);
+        sync.dispose();
+      });
+    });
+
+    test('dispose cancels the retry and ignores later triggers', () {
+      fakeAsync((async) {
+        var runs = 0;
+        final sync = SearchFeedbackAutoSync(
+          run: () async {
+            runs++;
+            return const Duration(minutes: 1);
+          },
+          isBusy: () => false,
+        );
+        unawaited(sync.request());
+        async.flushMicrotasks();
+        sync.dispose();
+        expect(sync.hasScheduledRetry, isFalse);
+        async.elapse(const Duration(hours: 1));
+        unawaited(sync.request());
+        sync.onRunningState(running: true);
+        sync.onRunningState(running: false);
+        async.flushMicrotasks();
+        expect(runs, 1);
+      });
+    });
+
+    test('a throwing run is logged and does not escape', () {
+      fakeAsync((async) {
+        final sync = SearchFeedbackAutoSync(
+          run: () async => throw StateError('boom'),
+          isBusy: () => false,
+        );
+        Object? escaped;
+        runZonedGuarded(() => unawaited(sync.request()), (e, _) => escaped = e);
+        async.flushMicrotasks();
+        expect(escaped, isNull);
+        expect(sync.hasScheduledRetry, isFalse);
+        sync.dispose();
+      });
+    });
   });
 
   test('the source is resolved with a fresh process probe every time',
@@ -155,74 +504,6 @@ void main() {
     await drive.resolveSource();
     await drive.resolveSource();
     expect(locator.probes, 2);
-  });
-
-  test('a source that is unavailable now does not consume the offer', () async {
-    final collectible = SearchFeedbackController(
-      transport: transport,
-      resolveSource: () async => consent ? 'source' : null,
-    );
-    addTearDown(collectible.dispose);
-    consent = false;
-    expect(await collectible.pendingToOffer(), 0);
-    consent = true;
-    expect(await collectible.pendingToOffer(), 2);
-    collectible.markDeclined(2);
-    expect(await collectible.pendingToOffer(), 0);
-  });
-
-  testWidgets(
-      'approving collection carries events and updates the pending count',
-      (tester) async {
-    final context = await _host(tester);
-    unawaited(offerSearchFeedbackCollection(context, controller));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text(strings.errorReports.collectConfirm));
-    await tester.pumpAndSettle();
-    expect(transport.sourceEvents, 0);
-    expect(transport.carriedEvents, 2);
-    expect(controller.outboxCount, 2);
-  });
-
-  testWidgets('revocation while the prompt is open keeps source events',
-      (tester) async {
-    final context = await _host(tester);
-    unawaited(offerSearchFeedbackCollection(context, controller));
-    await tester.pumpAndSettle();
-    consent = false;
-    await tester.tap(find.text(strings.errorReports.collectConfirm));
-    await tester.pumpAndSettle();
-    expect(transport.sourceEvents, 2);
-    expect(transport.carriedEvents, 0);
-    expect(await controller.collect(), 0);
-  });
-
-  testWidgets('declining upload never reaches the network transport',
-      (tester) async {
-    transport.carriedEvents = 2;
-    final context = await _host(tester);
-    unawaited(uploadAllReports(context, searchFeedback: controller));
-    await tester.pumpAndSettle();
-    expect(find.text(strings.libraryDomain.semanticFeedbackUploadTitle),
-        findsOneWidget);
-    await tester.tap(find.text(strings.common.cancel));
-    await tester.pumpAndSettle();
-    expect(transport.uploads, 0);
-    expect(transport.carriedEvents, 2);
-  });
-
-  testWidgets('read-only drive offers neither collection nor upload',
-      (tester) async {
-    transport.carriedEvents = 2;
-    final context = await _host(tester);
-    await offerSearchFeedbackCollection(context, controller, readOnly: true);
-    await tester.pumpAndSettle();
-    expect(find.text(strings.libraryDomain.semanticFeedbackCollectTitle),
-        findsNothing);
-    expect(find.text(strings.libraryDomain.semanticFeedbackUploadTitle),
-        findsNothing);
-    expect(transport.uploads, 0);
-    expect(transport.sourceEvents, 2);
   });
 
   test(
@@ -248,92 +529,6 @@ void main() {
     expect(launchReads, 0);
     expect(await settings.readAsBytes(), [1, 2, 3]);
     expect(await Directory(p.join(temporary.path, 'drive')).exists(), false);
-  });
-
-  group('home feedback actions', () {
-    late Directory temporary;
-    late OtzariaModuleController otzaria;
-    late LibraryModuleController library;
-    late PluginsModuleController plugins;
-    late LauncherUpdateController launcher;
-    late SettingsController settings;
-
-    setUp(() {
-      temporary = Directory.systemTemp.createTempSync('feedback-home-');
-      otzaria = OtzariaModuleController(dataDir: temporary.path);
-      library = LibraryModuleController(dataDir: temporary.path);
-      plugins = PluginsModuleController(mirrorRootDir: temporary.path);
-      launcher = LauncherUpdateController(dataDir: temporary.path);
-      settings = SettingsController(dataDir: temporary.path);
-      otzaria.onlineCheckedAt = DateTime.utc(2026, 9, 1);
-    });
-
-    tearDown(() {
-      otzaria.dispose();
-      library.dispose();
-      plugins.dispose();
-      launcher.dispose();
-      settings.dispose();
-      temporary.deleteSync(recursive: true);
-    });
-
-    HomeScreen home({bool readOnly = false, VoidCallback? onUpload}) =>
-        HomeScreen(
-          readOnly: readOnly,
-          otzaria: otzaria,
-          library: library,
-          plugins: plugins,
-          launcherUpdate: launcher,
-          settings: settings,
-          otzariaIsRunning: false,
-          onCloseOtzaria: () async => true,
-          isDownloading: false,
-          isCancellingDownload: false,
-          isCheckingOnline: false,
-          longTaskRunning: false,
-          onProcessStateChanged: () async => false,
-          onCheckOnline: () async {},
-          onDownloadAll: () async {},
-          onCancelDownload: () async {},
-          onDownloadLauncherUpdate: () async {},
-          onInstallLauncherUpdate: () async {},
-          onRequestReindex: () async {},
-          onGoToOtzaria: () {},
-          onGoToLibrary: () {},
-          searchFeedback: controller,
-          onUploadReports: () async => onUpload?.call(),
-        );
-
-    testWidgets(
-        'upload action appears only with carried data and calls handler',
-        (tester) async {
-      var clicks = 0;
-      await pumpScreen(tester, home(onUpload: () => clicks++));
-      expect(find.text(strings.errorReports.uploadButton(2)), findsNothing);
-      transport.carriedEvents = 2;
-      await controller.refreshOutbox();
-      await tester.pump();
-      expect(find.text(strings.errorReports.uploadButton(2)), findsOneWidget);
-      await tester.tap(find.text(strings.errorReports.uploadButton(2)));
-      expect(clicks, 1);
-    });
-
-    testWidgets('upload in progress exposes a stop action', (tester) async {
-      controller
-        ..outboxCount = 2
-        ..isUploading = true;
-      await pumpScreen(tester, home());
-      final stops = transport.stops;
-      await tester.tap(find.text(strings.errorReports.uploadStopButton));
-      expect(transport.stops, stops + 1);
-    });
-
-    testWidgets('read-only home hides pending feedback actions',
-        (tester) async {
-      controller.outboxCount = 2;
-      await pumpScreen(tester, home(readOnly: true));
-      expect(find.text(strings.errorReports.uploadButton(2)), findsNothing);
-    });
   });
 }
 

@@ -5,8 +5,10 @@ import 'package:otzaria_manager/otzaria_manager.dart';
 import 'package:path/path.dart' as p;
 
 import '../services/app_logger.dart';
-import '../services/offer_decline.dart';
 import 'dispose_guard.dart';
+
+/// מצב ההסכמה במחשב הזה: ביטול מפורש שונה ממחשב שבו היא אינה ידועה.
+enum SearchFeedbackConsent { granted, revoked, unknown }
 
 class SearchFeedbackController extends ChangeNotifier
     with DisposeGuard, SilentAfterDispose {
@@ -16,7 +18,9 @@ class SearchFeedbackController extends ChangeNotifier
     required this.transport,
     required this.resolveSource,
     Future<bool> Function()? grantConsent,
-  }) : _grantConsent = grantConsent;
+    Future<SearchFeedbackConsent> Function()? consentState,
+  })  : _grantConsent = grantConsent,
+        _consentState = consentState;
 
   factory SearchFeedbackController.forDrive({
     required String dataDir,
@@ -57,8 +61,27 @@ class SearchFeedbackController extends ChangeNotifier
       return root == null ? null : (locator: locator, root: root);
     }
 
+    Future<SearchFeedbackConsent> consent() async {
+      final launch = await launchPath();
+      if (launch == null) return SearchFeedbackConsent.unknown;
+      final locator = LibraryDbLocator.forLaunch(
+        stateDir: stateFilesDir ?? stateDir,
+        launchPath: launch,
+        dataDir: dataDir,
+      );
+      final root = await locator.otzariaSettingsRoot(launch);
+      if (root == null) return SearchFeedbackConsent.unknown;
+      final settings = await locator.settingsReader.read(root);
+      if (settings == null) return SearchFeedbackConsent.unknown;
+      if (settings.searchFeedbackGranted) return SearchFeedbackConsent.granted;
+      return settings.searchFeedbackConsent == null
+          ? SearchFeedbackConsent.unknown
+          : SearchFeedbackConsent.revoked;
+    }
+
     return SearchFeedbackController(
       transport: transport,
+      consentState: consent,
       resolveSource: () async {
         final location = await locate(fresh: true);
         if (location == null) return null;
@@ -84,16 +107,22 @@ class SearchFeedbackController extends ChangeNotifier
     );
   }
 
+  /// בלי השהיה שמורה אחרי כשל לא צפוי — לא לולאה צפופה.
+  static const Duration idleRetry = Duration(minutes: 15);
+  static const Duration minRetry = Duration(seconds: 30);
+
   final SearchFeedbackTransport transport;
   final Future<String?> Function() resolveSource;
   final Future<bool> Function()? _grantConsent;
-  final OfferDecline _decline = OfferDecline();
+  final Future<SearchFeedbackConsent> Function()? _consentState;
   bool isCollecting = false;
   bool isUploading = false;
   int outboxCount = 0;
+  Future<Duration?>? _run;
+  bool _stopRequested = false;
 
   Future<bool> grantConsent() async {
-    if (isDisposed || isCollecting || isUploading) return false;
+    if (isDisposed || isCollecting) return false;
     try {
       return await _grantConsent?.call() ?? false;
     } catch (error) {
@@ -112,20 +141,17 @@ class SearchFeedbackController extends ChangeNotifier
     notifyListeners();
   }
 
-  Future<int> pendingToOffer() async {
+  Future<int> pendingToCollect() async {
     if (isDisposed || isUploading || isCollecting) return 0;
     try {
       final source = await resolveSource();
       if (source == null) return 0;
-      final count = await transport.pendingForCollection(source);
-      return _decline.filter(count);
+      return await transport.pendingForCollection(source);
     } catch (error) {
       AppLogger.maybeInstance?.error('קריאת משוב החיפוש באוצריא נכשלה', error);
       return 0;
     }
   }
-
-  void markDeclined(int count) => _decline.mark(count);
 
   Future<int> collect() async {
     if (isCollecting || isUploading || isDisposed) return 0;
@@ -156,7 +182,74 @@ class SearchFeedbackController extends ChangeNotifier
     }
   }
 
-  void stop() => transport.stop();
+  /// איסוף ואז העלאה, בלי ממשק; כשל נרשם בלוג בלבד. מחזיר מתי לנסות שוב,
+  /// או null כשלא נשאר מה לשלוח.
+  Future<Duration?> synchronize() async {
+    if (isDisposed || isCollecting || isUploading || _run != null) return null;
+    _stopRequested = false;
+    final run = _run = _synchronize();
+    try {
+      return await run;
+    } finally {
+      _run = null;
+    }
+  }
+
+  /// עצירה מסודרת לפני עדכון עצמי או הפעלה כמנהל: הבקשה נקטעת בלי השהיה,
+  /// התור נשאר בכונן, והריצה שנעצרה מבקשת ניסיון חוזר קרוב.
+  Future<void> stopAndWait() async {
+    final run = _run;
+    if (run == null) return;
+    _stopRequested = true;
+    transport.stop();
+    await run;
+  }
+
+  /// בלי מקור הסכמה — כמו האיסוף: מקור שנפתר פירושו הסכמה קיימת.
+  Future<SearchFeedbackConsent> _consent() async {
+    final state = _consentState;
+    if (state != null) return state();
+    return await resolveSource() == null
+        ? SearchFeedbackConsent.unknown
+        : SearchFeedbackConsent.granted;
+  }
+
+  Future<Duration?> _synchronize() async {
+    try {
+      final pending = await pendingToCollect();
+      if (pending > 0 && !_stopRequested) await collect();
+    } catch (error) {
+      AppLogger.maybeInstance?.error('איסוף משוב החיפוש נכשל', error);
+    }
+    try {
+      if (isDisposed) return null;
+      if (_stopRequested) return minRetry;
+      await refreshOutbox();
+      if (isDisposed || outboxCount <= 0) return null;
+      if (_stopRequested) return minRetry;
+      final consent = await _consent();
+      if (consent == SearchFeedbackConsent.revoked) {
+        AppLogger.maybeInstance?.info('משוב החיפוש: ההסכמה בוטלה, אין העלאה');
+        return null;
+      }
+      if (_stopRequested) return minRetry;
+      final result = await upload();
+      if (isDisposed) return null;
+      if (_stopRequested) return minRetry;
+      if (result?.remaining == 0) return null;
+      final retryAt = await transport.retryAt();
+      final wait = retryAt?.difference(DateTime.now());
+      if (wait == null || wait <= Duration.zero) {
+        // מה שהתעבורה מדלגת עליו תמיד (מפתח חסר) אינו סיבה לנסות שוב.
+        final idle = result != null && result.sent + result.rejected == 0;
+        return idle ? null : idleRetry;
+      }
+      return wait < minRetry ? minRetry : wait;
+    } catch (error) {
+      AppLogger.maybeInstance?.error('העלאת משוב החיפוש נכשלה', error);
+      return isDisposed ? null : idleRetry;
+    }
+  }
 
   @override
   void dispose() {

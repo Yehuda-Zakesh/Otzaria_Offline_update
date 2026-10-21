@@ -165,6 +165,7 @@ class ErrorReportsController extends ChangeNotifier
       final queue = await _resolveQueue();
       if (queue == null) return (collected: 0, error: null);
       final result = await queue.collectTo(outbox);
+      if (result.collected > 0) _decline.reset();
       final error = result.error;
       if (error == null) return result;
       AppLogger.maybeInstance?.warn('איסוף חלקי: $error');

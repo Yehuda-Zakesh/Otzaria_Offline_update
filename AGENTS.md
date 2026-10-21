@@ -87,9 +87,9 @@ This repository is the updater/launcher for those users:
 network, so this launcher deliberately offers no "just update from the internet"
 path. Every check and every install reads the local folder, always — even when
 the machine is online. Two clicks touch the network: the download step, and
-uploading the error reports the drive collected (§5.10). The one deliberate
-exception is the launcher's **own** problem reports, sent without a click
-(§5.10).
+uploading the error reports the drive collected (§5.10). The two deliberate
+exceptions, sent without a click, are the launcher's **own** problem reports
+and the smart-search feedback the drive carries (§5.10).
 
 | Step | API | Network |
 | --- | --- | --- |
@@ -105,6 +105,7 @@ exception is the launcher's **own** problem reports, sent without a click
 | Collect Otzaria's unsent error reports to the drive | `ErrorReportsController.collect()` | no |
 | Upload the collected error reports | `ErrorReportUploader.upload()` | **yes**, light — a click only |
 | Send / retry the launcher's own reports | `AppReportService.send()` / `.startAutomaticFlush()` | **yes**, light — background, see §5.10 |
+| Collect + upload smart-search feedback | `SearchFeedbackController.synchronize()` | **yes**, light — background, see §5.10 |
 
 The "peek" calls exist only for the optional, one-shot, on-launch "is there
 anything new online?" nudge (`AppShell.checkOnline()`,
@@ -164,7 +165,8 @@ an existing install look new. Use `stateFilesDir`, never the logger's dir (it
 falls back to temp). Preferences stay in the root: they travel with the drive.
 
 Everything that writes to the drive is off, with no prompt anywhere: `downloadAll`,
-the plugin sync, custom-app add/download, error-report collect/upload, and self-update (it replaces the exe *on
+the plugin sync, custom-app add/download, error-report collect/upload, the
+search-feedback sync, and self-update (it replaces the exe *on
 the drive*). `checkOnline` is skipped too — "there is something new online" with no
 way to bring it is nagging. Detection is free on the normal path: the mirror probe
 runs **only** after the write probe failed. An empty locked folder is still
@@ -1827,7 +1829,8 @@ exe into `mirror/launcher/`, copies it over the stub (two renames, rollback on f
   already-rewritten manifest. `AppShell._longTaskRunning` (download, library `updating`,
   Otzaria `installing`, a custom-app install/learning/download, the store-app export)
   disables the card's button, and `AppShell._exitWouldInterrupt` (that plus error-report
-  and search-feedback collect/upload) guards `installLauncherUpdate` itself — the button
+  collect/upload; background search feedback is stopped first via
+  `settleBackgroundWork`, §5.10) guards `installLauncherUpdate` itself — the button
   is not enough, since `downloadLauncherUpdate` offers the install straight after a
   download. The guard runs again **after** the confirmation dialog, because the startup
   auto-install can begin while it is open. While the exe is being copied from the drive
@@ -1972,9 +1975,8 @@ them on the drive. **Otzaria is not changed for this**: the launcher reads and w
 Otzaria's own queue in `user_state.db` directly and builds the request body itself —
 every `sqlite3` call inside `Isolate.run`, the offer after the first frame (§5.9).
 UI for *Otzaria's* reports is deliberately one startup dialog plus **one** button in
-the download card (`ReportsUploadSection` → `uploadAllReports`, which uploads the
-reports and the smart-search feedback in sequence and reports one summary) — no screen,
-no nav item, no setting. The button appears only while some module's last online check
+the download card (`ReportsUploadSection` → `uploadAllReports`, reports only) — no
+screen, no nav item, no setting. The button appears only while some module's last online check
 succeeded (`_connection` in `HomeScreen`); otherwise only a caption says reports are
 waiting. Paths, table
 layout and the transaction are tabulated in `error_reports_manager/README.md`.
@@ -1982,8 +1984,8 @@ layout and the transaction are tabulated in `error_reports_manager/README.md`.
 **The launcher's own reports are a port of Otzaria's app reports, told apart
 by `product`.** `AppReportService` stamps `"product": "offline-update"` on
 its bodies; the site routes on it, and a report without it is Otzaria's — so
-`UserStateReportQueue` and `ErrorReportUploader` strip it. Unlike everything
-else here it uses the network unprompted (maintainer decision, 2026-10-09).
+`UserStateReportQueue` and `ErrorReportUploader` strip it. Like the search
+feedback below, it uses the network unprompted (maintainer decision, 2026-10-09).
 The queue is `<stateDir>/reports/launcher`, never under `mirror/` (on a
 read-only drive it stays on that machine); a transient failure keeps it
 queued. Code: `lib/src/launcher_report/`, `launcher_app/lib/src/app_report/`.
@@ -2058,12 +2060,22 @@ stay in the queue. App attachments travel in the outbox, not the sent history.
 
 **Check Otzaria is closed before the offer and after approval; retry on closure.**
 Writing under its open `user_state.db` can break its transactions (2026-10-13).
-`markDeclined` keeps a count threshold even when the queue shrinks; retry only
-above it. Offers also run with auto-check off, never on read-only drives, and
+`markDeclined` keeps a count threshold even when the queue shrinks, until a
+collection brings reports (else new ones stay hidden); retry only above it.
+Offers also run with auto-check off, never on read-only drives, and
 wait for dialogs and tasks, including 3s after launcher-initiated closure.
-`ReportOfferCoordinator`, `AppShell._onChange`, `offerErrorReportCollection`,
-`SearchFeedbackController`; task-ending paths must call `resume()`.
+`ReportOfferCoordinator`, `AppShell._onChange`, `offerErrorReportCollection`;
+task-ending paths must call `resume()` (on `_feedbackSync` too).
 See `launcher_app/README.md` for the collection and upload flow.
+
+**Smart-search feedback has no offer, button, count or message — it syncs in
+the background.** Maintainer decision (2026-10-21): collect when Otzaria is
+closed and consent is already granted, then upload, even with auto-check off.
+`SearchFeedbackAutoSync` waits on `_offers.busy`, never the dialog queue, and
+retries after `retryAt()`. A no-connection backoff stays in memory
+(`reachedServer: false`) — on the drive it delayed the online upload.
+Self-update and elevation call `stopAndWait()` first. Never merge it into the
+report offer or upload.
 
 **File first, then `markPendingReportAsSent` in one `BEGIN IMMEDIATE`.** A crash
 between them leaves the report pending and it is rewritten next time; the reverse order
@@ -2130,7 +2142,7 @@ verify something new.
 | Two-channel download (stable + newer pre-release, chosen offline) | Unit-tested only. Not verified what `fetchChannelReleases` returns against the real repo today, nor whether both installers fit comfortably on a typical drive |
 | Companion assets (mirror against the three real repos, installer into a real library folder) | Unit-tested only |
 | `OtzariaSettingsReader` against a real `app_preferences.hive` | Unit-tested only |
-| Smart search and training feedback | Unit- and widget-tested; active native-engine installation verification is documented in `library_manager/README.md`. Never exercised in a real Otzaria install, carried on a USB trip, or uploaded to the production feedback endpoint. See `error_reports_manager/README.md` |
+| Smart search and training feedback | Unit- and widget-tested, including the background collect/upload schedule; active native-engine installation verification is documented in `library_manager/README.md`. Never exercised in a real Otzaria install, carried on a USB trip, or uploaded to the production feedback endpoint. See `error_reports_manager/README.md` |
 | Combined first install (app wizard → auto-close → library), replacing the FULL package | Unit-tested only — the dialogs and the ordering are covered, but never run against a real wizard on a machine with no Otzaria, and the auto-close path has not been seen working. `otzaria.iss` was read to confirm `/NOLAUNCH=1` cannot clear the finish-page box |
 | Custom title bar (`window_manager` with the native frame hidden) | Unit-tested only, on either platform |
 | Error reports (§5.10) | Unit- and widget-tested only — against a DB built with Otzaria's schema and vectors from Otzaria's own code; never against a real installation's `user_state.db`, nor the real `otzaria.org` endpoint |

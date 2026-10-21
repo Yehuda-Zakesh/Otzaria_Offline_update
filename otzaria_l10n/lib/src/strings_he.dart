@@ -2374,35 +2374,12 @@ class _LibraryDomain extends LibraryDomainStrings {
   String get semanticConsentTitle => 'שיפור המנגנון';
   @override
   String get semanticConsentText =>
-      'זהו חיפוש ניסיוני, והחיפושים בו עוזרים לשפר אותו. לכן השימוש בו מותנה בהסכמה לשליחת נתוני שימוש אנונימיים: מילות החיפוש, התוצאות שהוצגו ודירוגן, הקטעים שנפתחו או שסומנו (אהבתי / לא אהבתי) וזמן העיון בהם, וכן גרסת התוכנה ומערכת ההפעלה. לא נשלחים שם, כתובת דוא"ל, נתיבי קבצים, תוכן מספרים אישיים או כל פרט מזהה אחר. מומלץ לא לכלול פרטים אישיים בטקסט החיפוש. אפשר לבטל את ההסכמה בכל עת בהגדרות, והביטול חוסם את מצב החיפוש הזה.\n\nהאישור מפעיל את ההסכמה בהגדרות אוצריא. במחשב הלא־מקוון נציע בנפרד לאסוף את הנתונים לכונן, ובמחשב המקוון נבקש אישור לשליחתם לאוצריא.';
+      'זהו חיפוש ניסיוני, והחיפושים בו עוזרים לשפר אותו. לכן השימוש בו מותנה בהסכמה לשליחת נתוני שימוש אנונימיים: מילות החיפוש, התוצאות שהוצגו ודירוגן, הקטעים שנפתחו או שסומנו (אהבתי / לא אהבתי) וזמן העיון בהם, וכן גרסת התוכנה ומערכת ההפעלה. לא נשלחים שם, כתובת דוא"ל, נתיבי קבצים, תוכן מתוך ספרים אישיים או כל פרט מזהה אחר. מומלץ לא לכלול פרטים אישיים בטקסט החיפוש. אפשר לבטל את ההסכמה בכל עת בהגדרות, והביטול חוסם את מצב החיפוש הזה.\n\nהאישור מפעיל את ההסכמה בהגדרות אוצריא. מרגע זה התוכנה אוספת את הנתונים לכונן ושולחת אותם לאוצריא כשיש חיבור לאינטרנט, אוטומטית וללא הודעות. הנתונים, כולל מילות החיפוש, נשמרים בכונן ללא הצפנה עד שליחתם, יחד עם המפתח האנונימי שחותם עליהם.';
   @override
   String get semanticConsentConfirm => 'אני מסכים';
   @override
-  String get semanticFeedbackCollectTitle => 'איסוף נתוני אימון לחיפוש החכם';
-  @override
-  String semanticFeedbackCollectBody(int count) =>
-      'באוצריא ממתינות $count רשומות נתוני שימוש בחיפוש החכם, שנאספו בהסכמתכם. להעביר אותן לכונן כדי לשלוח לאוצריא מהמחשב המקוון? הנתונים יוסרו מהתור של אוצריא רק לאחר שמירתם בכונן.\n\n'
-      'שימו לב: הרשומות, כולל מילות החיפוש, נשמרות בכונן בלי הצפנה עד שיישלחו, יחד עם המפתח האנונימי שחותם עליהן. המפתח נמחק מהכונן כשכל הרשומות נשלחו.';
-  @override
-  String get semanticFeedbackUploadTitle => 'שליחת נתוני אימון לאוצריא';
-  @override
-  String semanticFeedbackUploadBody(int count) =>
-      'בכונן ממתינות $count רשומות נתוני שימוש בחיפוש החכם שנאספו בהסכמה. לשלוח אותן כעת לשרת אוצריא כדי לשפר את החיפוש?';
-  @override
-  String semanticFeedbackCollected(int count) =>
-      '${count == 1 ? 'נאספה 1 רשומת' : 'נאספו $count רשומות'} נתוני אימון לכונן';
-  @override
-  String semanticFeedbackUploaded(int sent, int remaining) =>
-      '${sent == 1 ? 'נשלחה 1 רשומת' : 'נשלחו $sent רשומות'} נתוני אימון; '
-      '${remaining == 1 ? 'נשארה 1' : 'נשארו $remaining'} בכונן';
-  @override
   String get semanticFeedbackFailed =>
       'העברת נתוני האימון לא הושלמה. אפשר לנסות שוב; פרטים נשמרו ביומן.';
-  @override
-  String get semanticFeedbackUploadAction => 'שליחת נתוני אימון';
-  @override
-  String get semanticFeedbackNotCollected =>
-      'לא נאספו נתוני אימון. ודאו שאוצריא סגורה ושההסכמה פעילה בהגדרותיה.';
   @override
   String get semanticDownloadPrompt =>
       'להוריד גם את קובצי החיפוש החכם למחשב הלא־מקוון? הקבצים עשויים לתפוס כמה ג׳יגה־בייט. השימוש בחיפוש מחייב הסכמה באוצריא לאיסוף נתוני אימון. ההורדה אינה משנה את ההסכמה.';
@@ -3318,8 +3295,6 @@ class _ErrorReports extends ErrorReportsStrings {
   @override
   String get collectDialogTitle => 'דיווחים שלא נשלחו';
   @override
-  String get collectAllDialogTitle => 'איסוף נתונים מאוצריא';
-  @override
   String collectDialogContent(int count) =>
       'נמצאו באוצריא ${_reports(count)} על ספרים, התוכנה ותוספים שעדיין לא נשלחו.\n\n'
       'לאסוף אותם לכונן, כדי לשלוח אותם לאוצריא מהמחשב המחובר לרשת?\n\n'
@@ -3390,8 +3365,6 @@ class _ErrorReports extends ErrorReportsStrings {
       'ממתין לשרת — ממשיך בעוד $seconds שניות';
   @override
   String get uploadStopButton => 'עצירה';
-  @override
-  String get uploadingFeedbackStage => 'מעלה נתוני אימון לחיפוש החכם...';
   @override
   String uploadPendingOffline(int count) =>
       '${count == 1 ? 'ממתין' : 'ממתינים'} להעלאה ${_reports(count)}. אין חיבור לרשת, ולכן אין כפתור העלאה';

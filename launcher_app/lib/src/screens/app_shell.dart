@@ -34,6 +34,7 @@ import '../services/file_reveal.dart';
 import '../services/mirror_junk_sweeper.dart';
 import '../services/notices_seen_store.dart';
 import '../services/report_offer_coordinator.dart';
+import '../services/search_feedback_auto_sync.dart';
 import '../services/sleep_inhibitor.dart';
 import '../settings/app_settings.dart';
 import '../settings/safer_mode.dart';
@@ -72,6 +73,8 @@ class AppShell extends StatefulWidget {
     this.noticesStore,
     this.appReports,
     this.sleepInhibitor,
+    this.searchFeedback,
+    this.errorReports,
   }) : _stateDir = stateDir;
 
   /// התיקייה שלצד התוכנה — המראה, כלומר המקור שממנו קוראים ומתקינים.
@@ -107,6 +110,12 @@ class AppShell extends StatefulWidget {
   final AppReportsController? appReports;
 
   final SleepInhibitor? sleepInhibitor;
+
+  /// מוזרק בבדיקות; המסגרת לוקחת עליו בעלות ומשחררת אותו בפירוק.
+  final SearchFeedbackController? searchFeedback;
+
+  /// מוזרק בבדיקות; המסגרת לוקחת עליו בעלות ומשחררת אותו בפירוק.
+  final ErrorReportsController? errorReports;
 
   @override
   State<AppShell> createState() => _AppShellState();
@@ -210,15 +219,29 @@ class _AppShellState extends State<AppShell> {
   );
 
   late final ReportOfferCoordinator _offers = ReportOfferCoordinator(
-    isTaskRunning: () => _exitWouldInterrupt || _downloads.isPreparing,
+    isTaskRunning: () =>
+        _longTaskRunning ||
+        _errorReports.isCollecting ||
+        _errorReports.isUploading ||
+        _uploadingReports ||
+        _downloads.isPreparing,
     isActive: () => mounted,
     prepare: _prepareOffer,
     runDialog: _dialogs.run,
     perform: _performOffer,
+    onResume: () {
+      if (!widget.readOnly) _feedbackSync.resume();
+    },
   );
 
+  late final SearchFeedbackAutoSync _feedbackSync = SearchFeedbackAutoSync(
+    run: _syncSearchFeedback,
+    isBusy: () => _offers.busy,
+  );
+
+  final Completer<void> _firstFrame = Completer<void>();
+
   bool _uploadingReports = false;
-  bool _reportsStopRequested = false;
 
   late final DialogQueue _dialogs = DialogQueue(
     isActive: () => mounted,
@@ -229,6 +252,7 @@ class _AppShellState extends State<AppShell> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _firstFrame.complete());
     final s = widget.settings.settings;
 
     _otzaria = OtzariaModuleController(
@@ -290,20 +314,23 @@ class _AppShellState extends State<AppShell> {
       ..addListener(_onChange);
     _faq = FaqController(dataDir: widget.stateDir);
     unawaited(_faq.load());
-    _errorReports = ErrorReportsController.forDrive(
-      stateDir: widget.stateDir,
-      dataDir: widget.dataDir,
-      stateFilesDir: widget.stateFilesDir,
-      launchPath: () async => _otzaria.launchPath,
-    )..addListener(_onReportsChange);
-    _searchFeedback = SearchFeedbackController.forDrive(
-      dataDir: widget.dataDir,
-      stateDir: widget.stateDir,
-      stateFilesDir: widget.stateFilesDir,
-      launchPath: () async => _otzaria.launchPath,
-      runningLocator: widget.runningLocator,
-    )..addListener(_onReportsChange);
-    if (!widget.readOnly) unawaited(_searchFeedback.refreshOutbox());
+    _errorReports = (widget.errorReports ??
+        ErrorReportsController.forDrive(
+          stateDir: widget.stateDir,
+          dataDir: widget.dataDir,
+          stateFilesDir: widget.stateFilesDir,
+          launchPath: () async => _otzaria.launchPath,
+        ))
+      ..addListener(_onReportsChange);
+    _searchFeedback = (widget.searchFeedback ??
+        SearchFeedbackController.forDrive(
+          dataDir: widget.dataDir,
+          stateDir: widget.stateDir,
+          stateFilesDir: widget.stateFilesDir,
+          launchPath: () async => _otzaria.launchPath,
+          runningLocator: widget.runningLocator,
+        ))
+      ..addListener(_onReportsChange);
     if (!widget.readOnly) unawaited(_errorReports.refreshOutbox());
     _errorReportsIntro = _showErrorReportsIntro();
     widget.settings.addListener(_onChange);
@@ -318,7 +345,10 @@ class _AppShellState extends State<AppShell> {
       unawaited(_launcherFlow.checkMirror());
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        unawaited(_otzaria.ensureChecked().then((_) => _offers.request()));
+        unawaited(_otzaria.ensureChecked().then((_) {
+          _requestFeedbackSync();
+          return _offers.request();
+        }));
       });
     }
     if (widget.appReports case final reports?) {
@@ -340,6 +370,7 @@ class _AppShellState extends State<AppShell> {
     _dialogs.dispose();
     _runningPoll?.cancel();
     _offers.dispose();
+    _feedbackSync.dispose();
     unawaited(_installDone.cancel());
     unawaited(_installRejected.cancel());
     widget.settings.removeListener(_onChange);
@@ -365,6 +396,9 @@ class _AppShellState extends State<AppShell> {
     if (!mounted) return;
     _syncSleepInhibition();
     _offers.onRunningState(running: _otzariaIsRunning);
+    if (!widget.readOnly) {
+      _feedbackSync.onRunningState(running: _otzariaIsRunning);
+    }
     _offers.resume();
     _applySettings(widget.settings.settings);
     _syncRunningPoll();
@@ -492,6 +526,8 @@ class _AppShellState extends State<AppShell> {
     );
     if (approved == null) _offeredElevation = false;
     if (approved != true || !mounted) return;
+    await _searchFeedback.stopAndWait();
+    if (!mounted) return;
     if (_exitWouldInterrupt) {
       _offeredElevation = false;
       UiSnack.show(t.busyNotice);
@@ -583,6 +619,7 @@ class _AppShellState extends State<AppShell> {
     if (!mounted) return;
     await _autoInstallIfEnabled();
     if (!mounted) return;
+    _requestFeedbackSync();
     await _offers.request();
   }
 
@@ -599,8 +636,22 @@ class _AppShellState extends State<AppShell> {
       readOnly: widget.readOnly,
       isOtzariaRunning: refreshProcessState,
       notices: _notices,
-      searchFeedback: _searchFeedback,
     );
+  }
+
+  /// בלי ממשק ובלי המתנה לדיאלוג של דיווחי הטעויות; הבקר עצמו בודק הסכמה
+  /// ואוצריא סגורה. כונן לקריאה בלבד אינו מגיע לכאן — ראו [_requestFeedbackSync].
+  Future<Duration?> _syncSearchFeedback() async {
+    // לא endOfFrame: חלון ממוזער אינו מצייר, והניסיון ברקע היה נתקע.
+    await _firstFrame.future;
+    if (!mounted) return null;
+    // ריצה שהחלה אחרי stopAndWait, בזמן החלפת ה-exe או UAC.
+    if (_exitPending) return SearchFeedbackController.minRetry;
+    return _searchFeedback.synchronize();
+  }
+
+  void _requestFeedbackSync() {
+    if (!widget.readOnly && mounted) unawaited(_feedbackSync.request());
   }
 
   Future<void> _grantSemanticConsent() async {
@@ -622,6 +673,7 @@ class _AppShellState extends State<AppShell> {
         UiSnack.showError(t.semanticConsentRequired);
         return;
       }
+      _requestFeedbackSync();
       await _library.checkForUpdate();
     } catch (error, stack) {
       AppLogger.instance.error('כתיבת ההסכמה לחיפוש החכם נכשלה', error, stack);
@@ -634,12 +686,9 @@ class _AppShellState extends State<AppShell> {
         run: (onActive) => uploadAllReports(
           context,
           errorReports: _errorReports,
-          searchFeedback: _searchFeedback,
-          isCancelled: () => _reportsStopRequested,
           onActiveChanged: onActive,
           onUploadingChanged: (uploading) {
             if (!mounted) return;
-            if (uploading) _reportsStopRequested = false;
             setState(() => _uploadingReports = uploading);
             _syncSleepInhibition();
             _offers.resume();
@@ -721,6 +770,8 @@ class _AppShellState extends State<AppShell> {
 
   void _syncSleepInhibition() => _sleepInhibitor.setActive(
         _exitWouldInterrupt ||
+            _searchFeedback.isCollecting ||
+            _searchFeedback.isUploading ||
             _launcherUpdate.isDownloading ||
             _library.downloadStatus == MirrorDownloadStatus.downloading ||
             _otzaria.downloadStatus == OtzariaDownloadStatus.downloading ||
@@ -731,8 +782,6 @@ class _AppShellState extends State<AppShell> {
       _longTaskRunning ||
       _errorReports.isCollecting ||
       _errorReports.isUploading ||
-      _searchFeedback.isCollecting ||
-      _searchFeedback.isUploading ||
       _uploadingReports;
 
   Future<void> installLauncherUpdate() => _launcherFlow.install();
@@ -997,10 +1046,8 @@ class _AppShellState extends State<AppShell> {
             readOnly: widget.readOnly,
             driveFull: widget.driveFull,
             errorReports: _errorReports,
-            searchFeedback: _searchFeedback,
             isUploadingReports: _uploadingReports,
             onUploadReports: _uploadReports,
-            onStopReports: () => _reportsStopRequested = true,
           ),
         LauncherScreen.otzaria => OtzariaScreen(
             otzaria: _otzaria,
@@ -1235,6 +1282,9 @@ class _ShellLauncherHost implements LauncherUpdateHost {
 
   @override
   bool get wouldInterrupt => _shell._exitWouldInterrupt;
+
+  @override
+  Future<void> settleBackgroundWork() => _shell._searchFeedback.stopAndWait();
 
   @override
   Future<bool> confirmInstall(String version) =>

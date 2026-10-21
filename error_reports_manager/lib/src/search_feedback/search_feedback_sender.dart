@@ -47,6 +47,7 @@ class SearchFeedbackOutcome {
     this.keyId,
     this.strike = SearchFeedbackStrike.none,
     this.rejected = 0,
+    this.reachedServer = true,
   });
   final SearchFeedbackOutcomeKind kind;
 
@@ -61,8 +62,12 @@ class SearchFeedbackOutcome {
   /// אירועים שהשרת דילג עליהם בתוך אצווה שהתקבלה (Amendment B).
   final int rejected;
 
+  /// false — אין חיבור (או פסק זמן): ההשהיה מקומית למחשב, לא לכונן.
+  final bool reachedServer;
+
   static const SearchFeedbackOutcome network = SearchFeedbackOutcome(
     SearchFeedbackOutcomeKind.retryLater,
+    reachedServer: false,
   );
 }
 

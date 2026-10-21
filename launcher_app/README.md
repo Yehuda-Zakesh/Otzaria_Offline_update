@@ -606,10 +606,9 @@ personalUpdateMode`) הוא מה שנקרא בכל מקום, ולא `syncLibrary
 
 ### חריג שני: העלאת דיווחי טעויות
 
-דיווחי טעויות ומשוב החיפוש החכם שאוצריא לא הצליחה לשלוח נאספים לכונן במחשב
-הלא-מקוון (דיאלוג בעלייה ושוב בכל סגירה של אוצריא, `ReportOfferCoordinator` →
-`offerErrorReportCollection`), באישור אחד לשני סוגי הנתונים ובסיכום משותף.
-משוב החיפוש נאסף רק כשההסכמה באוצריא כבר קיימת. הנתונים נשלחים מכפתור אחד בכרטיס ההורדות במחשב המקוון
+דיווחי טעויות שאוצריא לא הצליחה לשלוח נאספים לכונן במחשב הלא-מקוון (דיאלוג
+בעלייה ושוב בכל סגירה של אוצריא, `ReportOfferCoordinator` →
+`offerErrorReportCollection`). הם נשלחים מכפתור אחד בכרטיס ההורדות במחשב המקוון
 (`ReportsUploadSection` → `uploadAllReports`), ורק כשבדיקה מקוונת אחרונה הצליחה;
 בלי חיבור נשאר כיתוב בלבד. זו הפנייה השנייה לרשת, וגם היא בלחיצה בלבד — אין לה חלק
 ב-`checkOnline`. הבקר (`ErrorReportsController`) אינו מחובר ל-listener של
@@ -647,6 +646,16 @@ personalUpdateMode`) הוא מה שנקרא בכל מקום, ולא `syncLibrary
 זיהוי שנכשל אינו משאיר את ההפעלה בלי נעילה. ההצעה למשתמש נשארת אחרי הפריים,
 וממתינה לדיאלוג פתוח **בלי גבול זמן** (הנעילה כבר נדרסה, והראיה אינה נשמרת
 בשום מקום אחר); ההמתנה מתבטלת עם סגירת המסגרת.
+
+### חריג רביעי, ובלי לחיצה: משוב החיפוש החכם
+
+המשוב אינו חלק מההצעה, מהכפתור, מהמונה או מהסיכומים של דיווחי הטעויות. כשההסכמה
+באוצריא כבר קיימת והיא סגורה, `SearchFeedbackAutoSync` אוסף אותו ומעלה את מה
+שבכונן ברקע (`SearchFeedbackController.synchronize`): אחרי העלייה, בכל סגירה של
+אוצריא, וגם כשהבדיקה האוטומטית כבויה. אין אישור ואין הודעה; כשל נרשם בלוג,
+והניסיון הבא ממתין להשהיה של התעבורה (`retryAt`). השהיה בגלל חוסר חיבור
+נשמרת בזיכרון בלבד ואינה נוסעת עם הכונן. לפני עדכון עצמי או הפעלה מחדש כמנהל
+המשוב נעצר בסדר (`stopAndWait`) והתור נשמר. לא בכונן לקריאה בלבד.
 
 ## מניעת שינה בזמן עבודה
 
@@ -929,11 +938,12 @@ lib/
     │   ├── app_logger.dart            — לוג לקובץ תחת <dataDir>/logs
     │   ├── file_reveal.dart           — פתיחת תיקייה ב-Explorer/Finder
     │   ├── report_offer_coordinator.dart, report_offer_trigger.dart, offer_decline.dart — מתי להציע איסוף
+    │   ├── search_feedback_auto_sync.dart — איסוף והעלאה של משוב החיפוש ברקע
     │   └── hebrew_date.dart           — המרה לתאריך עברי + גימטריה
     └── screens/
         ├── app_shell.dart             — סרגל ניווט, סרגל מצב, IndexedStack מדורג
         ├── home_screen.dart, otzaria_screen.dart, library_screen.dart, settings_screen.dart
-        ├── error_reports_flow.dart, search_feedback_flow.dart — הצעת האיסוף
+        ├── error_reports_flow.dart    — הצעת האיסוף
         ├── reports_upload_flow.dart, reports_upload_section.dart — כפתור ההעלאה האחד
         ├── faq/                       — הדרכת שאלות נפוצות (ראו למטה)
         │   ├── faq_content.dart             — הזוגות שאלה/תשובה, מקובצים

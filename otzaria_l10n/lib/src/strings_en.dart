@@ -2560,35 +2560,12 @@ class _LibraryDomain extends LibraryDomainStrings {
   String get semanticConsentTitle => 'Help Improve the Engine';
   @override
   String get semanticConsentText =>
-      'This is experimental search, and your searches help improve it. Using it requires consent to send anonymous usage data: search terms, displayed results and their rankings, passages opened or rated (like / dislike) and time spent reading them, plus the app and operating system versions. Names, email addresses, file paths, content from personal books, and other identifying details are not sent. Avoid including personal details in search terms. You can revoke consent at any time in settings; revoking it disables this search mode.\n\nConfirming enables consent in Otzaria settings. On the offline computer we will ask separately to collect the data onto the drive, and on the online computer we will ask permission to send it to Otzaria.';
+      'This is experimental search, and your searches help improve it. Using it requires consent to send anonymous usage data: search terms, displayed results and their rankings, passages opened or rated (like / dislike) and time spent reading them, plus the app and operating system versions. Names, email addresses, file paths, content from personal books, and other identifying details are not sent. Avoid including personal details in search terms. You can revoke consent at any time in settings; revoking it disables this search mode.\n\nConfirming enables consent in Otzaria settings. From then on, the app collects the data onto the drive and sends it to Otzaria whenever there is an internet connection, automatically and without notifications. The data, including search terms, is stored on the drive unencrypted until it is sent, together with the anonymous key that signs it.';
   @override
   String get semanticConsentConfirm => 'I agree';
   @override
-  String get semanticFeedbackCollectTitle =>
-      'Collect smart search training data';
-  @override
-  String semanticFeedbackCollectBody(int count) =>
-      'Otzaria has $count records of smart search usage data collected with your consent. Transfer them to the drive for sending from the online computer? They will be removed from Otzaria’s queue only after being saved to the drive.\n\n'
-      'Note: the records, including the search queries, are stored on the drive unencrypted until they are sent, together with the anonymous key that signs them. The key is deleted from the drive once all records have been sent.';
-  @override
-  String get semanticFeedbackUploadTitle => 'Send training data to Otzaria';
-  @override
-  String semanticFeedbackUploadBody(int count) =>
-      'The drive has $count records of smart search usage data collected with consent. Send them to Otzaria’s server now to improve search?';
-  @override
-  String semanticFeedbackCollected(int count) =>
-      'Collected $count training data records onto the drive';
-  @override
-  String semanticFeedbackUploaded(int sent, int remaining) =>
-      'Sent $sent training data records; $remaining remain on the drive';
-  @override
   String get semanticFeedbackFailed =>
       'Training data transfer did not finish. You can try again; details were saved to the log.';
-  @override
-  String get semanticFeedbackUploadAction => 'Send training data';
-  @override
-  String get semanticFeedbackNotCollected =>
-      'No training data was collected. Make sure Otzaria is closed and consent is enabled in its settings.';
   @override
   String get semanticDownloadPrompt =>
       'Download smart search files for the offline computer too? The files may take several gigabytes. Smart search requires consent in Otzaria to collect training data. Downloading does not change that consent.';
@@ -3567,8 +3544,6 @@ class _ErrorReports extends ErrorReportsStrings {
   @override
   String get collectDialogTitle => 'Unsent reports';
   @override
-  String get collectAllDialogTitle => 'Collect data from Otzaria';
-  @override
   String collectDialogContent(int count) =>
       'Otzaria has $count ${_reports(count)} about books, the app and plugins '
       'that have not been '
@@ -3646,9 +3621,6 @@ class _ErrorReports extends ErrorReportsStrings {
       'Waiting for the server — continuing in $seconds seconds';
   @override
   String get uploadStopButton => 'Stop';
-  @override
-  String get uploadingFeedbackStage =>
-      'Uploading smart search training data...';
   @override
   String uploadPendingOffline(int count) =>
       '$count ${_reports(count)} waiting to be uploaded. There is no network connection, so there is no upload button';

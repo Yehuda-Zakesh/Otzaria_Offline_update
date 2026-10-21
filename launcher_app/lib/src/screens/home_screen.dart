@@ -6,7 +6,6 @@ import '../controllers/launcher_update_controller.dart';
 import '../controllers/library_module_controller.dart';
 import '../controllers/otzaria_module_controller.dart';
 import '../controllers/plugins_module_controller.dart';
-import '../controllers/search_feedback_controller.dart';
 import '../flows/library_flows.dart';
 import '../flows/otzaria_flows.dart';
 import '../services/byte_size.dart';
@@ -45,8 +44,6 @@ class HomeScreen extends StatelessWidget {
     this.errorReports,
     this.isUploadingReports = false,
     this.onUploadReports,
-    this.onStopReports,
-    this.searchFeedback,
   });
 
   final OtzariaModuleController otzaria;
@@ -95,8 +92,6 @@ class HomeScreen extends StatelessWidget {
   final bool driveFull;
 
   final ErrorReportsController? errorReports;
-  final SearchFeedbackController? searchFeedback;
-  final VoidCallback? onStopReports;
   final bool isUploadingReports;
   final Future<void> Function()? onUploadReports;
 
@@ -431,15 +426,13 @@ class HomeScreen extends StatelessWidget {
                   onPressed: isCancellingDownload ? null : onCancelDownload,
                 ),
               ],
-              if (!readOnly && (errorReports != null || searchFeedback != null))
+              if (!readOnly && errorReports != null)
                 ReportsUploadSection(
-                  errorReports: errorReports,
-                  searchFeedback: searchFeedback,
+                  errorReports: errorReports!,
                   connection: isCheckingOnline ? null : _connection,
                   isUploadingAll: isUploadingReports,
                   busy: longTaskRunning,
                   onUpload: onUploadReports,
-                  onStop: onStopReports,
                 ),
               if (lastChecked != null) ...[
                 const SizedBox(height: AppTokens.spaceSM),

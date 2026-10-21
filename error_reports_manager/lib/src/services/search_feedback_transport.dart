@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 
@@ -27,11 +28,14 @@ class SearchFeedbackTransport {
   bool _stopped = false;
   Completer<void> _abort = Completer<void>();
   int _backoffStep = 0;
+  DateTime? _offlineRetryAt;
 
   static String dirIn(String dataDir) => p.join(dataDir, 'search-feedback');
 
   static const Duration carriedWindow = Duration(days: 89);
   static const Duration plainWindow = Duration(days: 29);
+
+  static const int maxSplitDepth = 8;
 
   SearchFeedbackQueue _queue(String path) => SearchFeedbackQueue(
         () async => Directory(path),
@@ -158,6 +162,23 @@ class SearchFeedbackTransport {
     _client.close();
   }
 
+  File get _retryFile => File(p.join(directory, 'retry-at.txt'));
+
+  /// לפני המועד הזה [upload] אינו פונה לרשת; null — אין השהיה.
+  Future<DateTime?> retryAt() async {
+    DateTime? stored;
+    try {
+      stored = DateTime.tryParse(await _retryFile.readAsString());
+    } on FileSystemException {
+      stored = null;
+    }
+    final offline = _offlineRetryAt;
+    if (stored == null || (offline != null && offline.isAfter(stored))) {
+      return offline;
+    }
+    return stored;
+  }
+
   Future<SearchFeedbackUploadResult> upload() async {
     _stopped = false;
     _abort = Completer<void>();
@@ -167,13 +188,11 @@ class SearchFeedbackTransport {
       p.join(directory, 'transport.lock'),
     );
     try {
-      final retryFile = File(p.join(directory, 'retry-at.txt'));
+      final retryFile = _retryFile;
       final filteredFile = File(p.join(directory, 'network-block.json'));
-      if (await retryFile.exists()) {
-        final retryAt = DateTime.tryParse(await retryFile.readAsString());
-        if (retryAt != null && retryAt.isAfter(DateTime.now())) {
-          return (sent: 0, rejected: 0, remaining: await count());
-        }
+      final retryAt = await this.retryAt();
+      if (retryAt != null && retryAt.isAfter(DateTime.now())) {
+        return (sent: 0, rejected: 0, remaining: await count());
       }
       Future<void> defer(SearchFeedbackOutcome outcome) async {
         if (_stopped) return;
@@ -187,6 +206,11 @@ class SearchFeedbackTransport {
           previousFilteredSeconds:
               filtered ? await _filteredDelaySeconds(filteredFile) : 0,
         );
+        // השהיה שנשמרת בכונן הייתה נוסעת איתו ומעכבת את המחשב המקוון.
+        if (!outcome.reachedServer) {
+          _offlineRetryAt = DateTime.now().add(delay);
+          return;
+        }
         if (filtered) {
           await _replace(
             filteredFile,
@@ -210,8 +234,12 @@ class SearchFeedbackTransport {
           baseUrl: _baseUrl,
           clock: DateTime.now,
         );
-        for (final name in await queue.sealAndList()) {
+        final work = Queue<String>.of(await queue.sealAndList());
+        final queued = work.toSet();
+        final splitDepth = <String, int>{};
+        while (work.isNotEmpty) {
           if (_stopped) break;
+          final name = work.removeFirst();
           final claimed = await queue.claim(name);
           if (claimed == null) continue;
           var carried = true;
@@ -298,13 +326,29 @@ class SearchFeedbackTransport {
               rejected += outcome.rejected + droppedByFallback;
               await queue.remove(claimed);
               _backoffStep = 0;
+              _offlineRetryAt = null;
               if (await retryFile.exists()) await retryFile.delete();
               if (await filteredFile.exists()) await filteredFile.delete();
             case SearchFeedbackOutcomeKind.drop:
               rejected += batch.eventLines.length + droppedByFallback;
               await queue.remove(claimed);
             case SearchFeedbackOutcomeKind.tooLarge:
+              final depth = splitDepth[name] ?? 0;
+              final size = batch.eventLines.length;
+              if (size < 2 || depth >= maxSplitDepth) {
+                rejected += size;
+                await queue.remove(claimed);
+                break;
+              }
               await queue.split(claimed);
+              final parts = [
+                for (final part in await queue.sealAndList())
+                  if (queued.add(part)) part,
+              ];
+              for (final part in parts) {
+                splitDepth[part] = depth + 1;
+              }
+              work.addAll(parts);
             case SearchFeedbackOutcomeKind.keyBlocked:
               identity.blocked = true;
               await store.save(identity);

@@ -134,6 +134,32 @@ void main() {
     expect(performed, 1);
   });
 
+  testWidgets('the end of the grace period and of an upload reach onResume',
+      (tester) async {
+    var resumed = 0;
+    final withListener = ReportOfferCoordinator(
+      isTaskRunning: () => false,
+      isActive: () => true,
+      prepare: () async => false,
+      runDialog: (body) => body(),
+      perform: () async {},
+      onResume: () => resumed++,
+    );
+    addTearDown(withListener.dispose);
+    await withListener.holdFor(() async {});
+    expect(withListener.busy, isTrue);
+    await tester.pump(const Duration(seconds: 3));
+    expect(resumed, 1);
+    expect(withListener.busy, isFalse);
+
+    withListener.setUploadActive(true);
+    withListener.setUploadActive(false);
+    expect(resumed, 2);
+    withListener.dispose();
+    withListener.resume();
+    expect(resumed, 2);
+  });
+
   testWidgets('a new hold cancels the previous grace timer', (tester) async {
     coordinator.onRunningState(running: true);
     await coordinator.holdFor(() async {

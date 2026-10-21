@@ -17,11 +17,9 @@ import 'package:launcher_app/src/controllers/launcher_update_controller.dart';
 import 'package:launcher_app/src/controllers/library_module_controller.dart';
 import 'package:launcher_app/src/controllers/otzaria_module_controller.dart';
 import 'package:launcher_app/src/controllers/plugins_module_controller.dart';
-import 'package:launcher_app/src/controllers/search_feedback_controller.dart';
 import 'package:launcher_app/src/screens/error_reports_flow.dart';
 import 'package:launcher_app/src/screens/home_screen.dart';
 import 'package:launcher_app/src/screens/reports_upload_flow.dart';
-import 'package:launcher_app/src/screens/reports_upload_section.dart';
 import 'package:launcher_app/src/services/notices_seen_store.dart';
 import 'package:launcher_app/src/services/report_offer_trigger.dart';
 import 'package:launcher_app/src/settings/settings_controller.dart';
@@ -468,6 +466,21 @@ void main() {
       pending = 3;
       expect(await c.pendingToOffer(), 0);
     });
+
+    test('אחרי איסוף מוצלח הסף מהסירוב הקודם מתאפס לדיווחים חדשים', () async {
+      var pending = 3;
+      final c = ErrorReportsController(
+        outbox: outbox,
+        resolveQueue: () async => _FakeQueue(pending),
+      );
+      c.markDeclined(3);
+      pending = 4;
+      expect(await c.pendingToOffer(), 4);
+      expect((await c.collect()).collected, 4);
+
+      pending = 1;
+      expect(await c.pendingToOffer(), 1);
+    });
   });
 
   test('דיווח בודד בעברית בלשון יחיד', () {
@@ -481,19 +494,6 @@ void main() {
   test('ניסוח יחיד בעברית: פועל וספירה', () {
     expect(t.uploadPendingOffline(1), startsWith('ממתין להעלאה 1 דיווח'));
     expect(t.uploadPendingOffline(2), startsWith('ממתינים להעלאה 2 דיווחים'));
-    final library = stringsOf().libraryDomain;
-    expect(
-      library.semanticFeedbackUploaded(1, 1),
-      'נשלחה 1 רשומת נתוני אימון; נשארה 1 בכונן',
-    );
-    expect(
-      library.semanticFeedbackUploaded(2, 3),
-      'נשלחו 2 רשומות נתוני אימון; נשארו 3 בכונן',
-    );
-    expect(
-      library.semanticFeedbackCollected(1),
-      'נאספה 1 רשומת נתוני אימון לכונן',
-    );
   });
 
   group('איסוף בעלייה', () {
@@ -517,196 +517,54 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('empty sources never offer collection', (tester) async {
+    testWidgets('empty reports never offer collection', (tester) async {
       final c = controller();
-      final transport = _CollectionFeedback()..pendingEvents = 0;
-      final feedback = SearchFeedbackController(
-        transport: transport,
-        resolveSource: () async => 'source',
-      );
       addTearDown(c.dispose);
-      addTearDown(feedback.dispose);
       final ctx = await host(tester);
       final result = await offerErrorReportCollection(ctx, c,
-          searchFeedback: feedback, isOtzariaRunning: () async => false);
+          isOtzariaRunning: () async => false);
       expect(result, ReportOfferOutcome.notOffered);
       expect(find.byType(AlertDialog), findsNothing);
-      expect(transport.collections, 0);
     });
 
-    for (final newFeedback in [false, true]) {
-      testWidgets(
-          'declining new data preserves the other decline ($newFeedback)',
+    for (final partial in [false, true]) {
+      testWidgets('the offer and its summary cover reports only ($partial)',
           (tester) async {
-        final queue = _QaQueue(2);
+        final queue = _QaQueue(2, partial: partial);
         final c = ErrorReportsController(
           outbox: outbox,
           resolveQueue: () async => queue,
         );
-        final transport = _CollectionFeedback();
-        final feedback = SearchFeedbackController(
-          transport: transport,
-          resolveSource: () async => 'source',
-        );
         addTearDown(c.dispose);
-        addTearDown(feedback.dispose);
+        final messages = <String>[];
+        final previousPrint = debugPrint;
+        debugPrint = (String? message, {int? wrapWidth}) {
+          if (message?.startsWith('UiSnack') ?? false) messages.add(message!);
+        };
+        addTearDown(() => debugPrint = previousPrint);
         final ctx = await host(tester);
-        Future<void> decline() async {
-          unawaited(offerErrorReportCollection(ctx, c,
-              searchFeedback: feedback, isOtzariaRunning: () async => false));
-          await tester.pumpAndSettle();
-          await tester.tap(find.text(t.collectLater));
-          await tester.pumpAndSettle();
-        }
-
-        await decline();
-        if (newFeedback) {
-          transport.pendingEvents++;
-        } else {
-          queue.pending++;
-        }
-        await decline();
-        expect(await c.pendingToOffer(), 0);
-        expect(await feedback.pendingToOffer(), 0);
-        expect(outbox.reports, isEmpty);
-        expect(transport.carried, 0);
+        unawaited(offerErrorReportCollection(ctx, c,
+            isOtzariaRunning: () async => running));
+        await tester.pumpAndSettle();
+        expect(find.text(t.collectDialogTitle), findsOneWidget);
+        expect(find.text(t.collectDialogContent(2)), findsOneWidget);
+        await tester.tap(find.text(t.collectConfirm));
+        await tester.pumpAndSettle();
+        debugPrint = previousPrint;
+        expect(outbox.reports.length, partial ? 1 : 2);
+        expect(messages, hasLength(1));
+        expect(
+            messages.single,
+            endsWith(partial
+                ? t.collectPartialSnack(
+                    1, stringsOf().errorReportsDomain.someNotCollected)
+                : t.collectedSnack(2)));
       });
     }
 
-    for (final reportFailure in [false, true]) {
-      for (final feedbackFailure in [false, true]) {
-        testWidgets(
-            'combined summary preserves partial results ($reportFailure, $feedbackFailure)',
-            (tester) async {
-          final queue = _QaQueue(2, partial: reportFailure);
-          final c = ErrorReportsController(
-            outbox: outbox,
-            resolveQueue: () async => queue,
-          );
-          final transport = _CollectionFeedback()
-            ..failCollection = feedbackFailure;
-          final feedback = SearchFeedbackController(
-            transport: transport,
-            resolveSource: () async => 'source',
-          );
-          addTearDown(c.dispose);
-          addTearDown(feedback.dispose);
-          final messages = <String>[];
-          final previousPrint = debugPrint;
-          debugPrint = (String? message, {int? wrapWidth}) {
-            if (message?.startsWith('UiSnack') ?? false) messages.add(message!);
-          };
-          addTearDown(() => debugPrint = previousPrint);
-          final ctx = await host(tester);
-          unawaited(offerErrorReportCollection(ctx, c,
-              searchFeedback: feedback, isOtzariaRunning: () async => running));
-          await tester.pumpAndSettle();
-          await tester.tap(find.text(t.collectConfirm));
-          await tester.pumpAndSettle();
-          debugPrint = previousPrint;
-          expect(queue.pending, reportFailure ? 1 : 0);
-          expect(outbox.reports.length, reportFailure ? 1 : 2);
-          expect(transport.carried, feedbackFailure ? 0 : 3);
-          expect(transport.pendingEvents, feedbackFailure ? 3 : 0);
-          expect(c.isCollecting, isFalse);
-          expect(feedback.isCollecting, isFalse);
-          expect(messages, hasLength(1));
-          expect(
-              messages.single,
-              contains(feedbackFailure
-                  ? stringsOf().libraryDomain.semanticFeedbackFailed
-                  : stringsOf().libraryDomain.semanticFeedbackCollected(3)));
-          expect(
-              messages.single,
-              contains(reportFailure
-                  ? t.collectPartialSnack(
-                      1, stringsOf().errorReportsDomain.someNotCollected)
-                  : t.collectedSnack(2)));
-          if (feedbackFailure) {
-            transport.failCollection = false;
-            unawaited(offerErrorReportCollection(ctx, c,
-                searchFeedback: feedback,
-                isOtzariaRunning: () async => running));
-            await tester.pumpAndSettle();
-            await tester.tap(find.text(t.collectConfirm));
-            await tester.pumpAndSettle();
-            expect(transport.carried, 3);
-          }
-        });
-      }
-    }
-
-    testWidgets('Otzaria reopening between stages preserves feedback for retry',
-        (tester) async {
-      final messages = <String>[];
-      final previousPrint = debugPrint;
-      debugPrint = (String? message, {int? wrapWidth}) {
-        if (message?.startsWith('UiSnack') ?? false) messages.add(message!);
-      };
-      addTearDown(() => debugPrint = previousPrint);
-      final queue = _QaQueue(2, onCollect: () => running = true);
-      final c = ErrorReportsController(
-        outbox: outbox,
-        resolveQueue: () async => queue,
-      );
-      final transport = _CollectionFeedback();
-      final feedback = SearchFeedbackController(
-        transport: transport,
-        resolveSource: () async => 'source',
-      );
-      addTearDown(c.dispose);
-      addTearDown(feedback.dispose);
-      final ctx = await host(tester);
-      unawaited(offerErrorReportCollection(ctx, c,
-          searchFeedback: feedback, isOtzariaRunning: () async => running));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text(t.collectConfirm));
-      await tester.pumpAndSettle();
-      debugPrint = previousPrint;
-      expect(messages, hasLength(1));
-      expect(messages.single, contains(t.collectedSnack(2)));
-      expect(messages.single,
-          contains(stringsOf().libraryDomain.semanticFeedbackNotCollected));
-      expect(outbox.reports.length, 2);
-      expect(transport.collections, 0);
-      expect(transport.pendingEvents, 3);
-      running = false;
-      unawaited(offerErrorReportCollection(ctx, c,
-          searchFeedback: feedback, isOtzariaRunning: () async => running));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text(t.collectConfirm));
-      await tester.pumpAndSettle();
-      expect(transport.carried, 3);
-      expect(queue.collections, 1);
-    });
-
-    testWidgets(
-        'revoking feedback consent during approval preserves its source',
-        (tester) async {
-      var consent = true;
-      final c = controller(pending: 2);
-      final transport = _CollectionFeedback();
-      final feedback = SearchFeedbackController(
-        transport: transport,
-        resolveSource: () async => consent ? 'source' : null,
-      );
-      addTearDown(c.dispose);
-      addTearDown(feedback.dispose);
-      final ctx = await host(tester);
-      unawaited(offerErrorReportCollection(ctx, c,
-          searchFeedback: feedback, isOtzariaRunning: () async => running));
-      await tester.pumpAndSettle();
-      consent = false;
-      await tester.tap(find.text(t.collectConfirm));
-      await tester.pumpAndSettle();
-      expect(outbox.reports.length, 2);
-      expect(transport.pendingEvents, 3);
-      expect(transport.carried, 0);
-    });
-
     for (final language in AppLanguage.values) {
       for (final scale in [1.0, 2.0, 3.0]) {
-        testWidgets('combined offer remains usable at $language / $scale',
+        testWidgets('the offer remains usable at $language / $scale',
             (tester) async {
           useViewSize(tester, const Size(800, 600));
           tester.platformDispatcher.textScaleFactorTestValue = scale;
@@ -722,22 +580,14 @@ void main() {
             language: language,
           ));
           final c = controller(pending: 9999);
-          final transport = _CollectionFeedback()..pendingEvents = 9999;
-          final feedback = SearchFeedbackController(
-            transport: transport,
-            resolveSource: () async => 'source',
-          );
           addTearDown(c.dispose);
-          addTearDown(feedback.dispose);
           unawaited(offerErrorReportCollection(ctx, c,
-              searchFeedback: feedback, isOtzariaRunning: () async => false));
+              isOtzariaRunning: () async => false));
           await tester.pumpAndSettle();
           final strings = stringsOf(language);
           expect(tester.takeException(), isNull);
-          final body = tester.widget<Text>(find.textContaining(
-              strings.libraryDomain.semanticFeedbackCollectBody(9999)));
-          expect(body.data,
-              contains(strings.errorReports.collectDialogContent(9999)));
+          expect(find.text(strings.errorReports.collectDialogContent(9999)),
+              findsOneWidget);
           final cancel = find.text(strings.errorReports.collectLater);
           expect(cancel.hitTestable(), findsOneWidget);
           expect(find.text(strings.errorReports.collectConfirm).hitTestable(),
@@ -745,7 +595,6 @@ void main() {
           await tester.tap(cancel);
           await tester.pumpAndSettle();
           expect(outbox.reports, isEmpty);
-          expect(transport.carried, 0);
           expect(tester.takeException(), isNull);
         });
       }
@@ -766,51 +615,14 @@ void main() {
       expect(queue.collections, 0);
     });
 
-    for (final reports in [0, 2]) {
-      testWidgets('one approval collects reports ($reports) and feedback',
-          (tester) async {
-        final c = controller(pending: reports);
-        final transport = _CollectionFeedback();
-        final feedback = SearchFeedbackController(
-          transport: transport,
-          resolveSource: () async => 'source',
-        );
-        addTearDown(c.dispose);
-        addTearDown(feedback.dispose);
-        final ctx = await host(tester);
-        unawaited(offerErrorReportCollection(ctx, c,
-            searchFeedback: feedback, isOtzariaRunning: () async => running));
-        await tester.pumpAndSettle();
-        expect(find.text(t.collectAllDialogTitle), findsOneWidget);
-        expect(find.text(t.collectConfirm), findsOneWidget);
-        await tester.tap(find.text(t.collectConfirm));
-        await tester.pumpAndSettle();
-        expect(outbox.reports.length, reports);
-        expect(transport.carried, 3);
-        expect(find.text(t.collectAllDialogTitle), findsNothing);
-        expect(
-            find.text(stringsOf().libraryDomain.semanticFeedbackCollectTitle),
-            findsNothing);
-      });
-    }
-
     for (final readOnly in [false, true]) {
-      testWidgets(
-          'collection preserves consent and read-only guards ($readOnly)',
+      testWidgets('collection keeps the read-only guard ($readOnly)',
           (tester) async {
         final c = controller(pending: 2);
-        final transport = _CollectionFeedback();
-        final feedback = SearchFeedbackController(
-          transport: transport,
-          resolveSource: () async => null,
-        );
         addTearDown(c.dispose);
-        addTearDown(feedback.dispose);
         final ctx = await host(tester);
         unawaited(offerErrorReportCollection(ctx, c,
-            readOnly: readOnly,
-            searchFeedback: feedback,
-            isOtzariaRunning: () async => running));
+            readOnly: readOnly, isOtzariaRunning: () async => running));
         await tester.pumpAndSettle();
         if (!readOnly) {
           expect(find.text(t.collectDialogTitle), findsOneWidget);
@@ -818,50 +630,21 @@ void main() {
           await tester.pumpAndSettle();
         }
         expect(outbox.reports.length, readOnly ? 0 : 2);
-        expect(transport.carried, 0);
-        expect(transport.pendingEvents, 3);
       });
     }
 
-    testWidgets('one decline suppresses both offers', (tester) async {
+    testWidgets('reopening Otzaria during approval prevents collection',
+        (tester) async {
       final c = controller(pending: 2);
-      final transport = _CollectionFeedback();
-      final feedback = SearchFeedbackController(
-        transport: transport,
-        resolveSource: () async => 'source',
-      );
       addTearDown(c.dispose);
-      addTearDown(feedback.dispose);
       final ctx = await host(tester);
       unawaited(offerErrorReportCollection(ctx, c,
-          searchFeedback: feedback, isOtzariaRunning: () async => running));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text(t.collectLater));
-      await tester.pumpAndSettle();
-      expect(await c.pendingToOffer(), 0);
-      expect(await feedback.pendingToOffer(), 0);
-      expect(outbox.reports, isEmpty);
-      expect(transport.carried, 0);
-    });
-
-    testWidgets('reopening Otzaria prevents both collections', (tester) async {
-      final c = controller(pending: 2);
-      final transport = _CollectionFeedback();
-      final feedback = SearchFeedbackController(
-        transport: transport,
-        resolveSource: () async => 'source',
-      );
-      addTearDown(c.dispose);
-      addTearDown(feedback.dispose);
-      final ctx = await host(tester);
-      unawaited(offerErrorReportCollection(ctx, c,
-          searchFeedback: feedback, isOtzariaRunning: () async => running));
+          isOtzariaRunning: () async => running));
       await tester.pumpAndSettle();
       running = true;
       await tester.tap(find.text(t.collectConfirm));
       await tester.pumpAndSettle();
       expect(outbox.reports, isEmpty);
-      expect(transport.carried, 0);
     });
 
     testWidgets('אוצריא פתוחה → אין דיאלוג, וההצעה לא "נוצלה"', (tester) async {
@@ -971,7 +754,6 @@ void main() {
     HomeScreen home(
       ErrorReportsController reports, {
       bool readOnly = false,
-      SearchFeedbackController? feedback,
       Future<void> Function()? onUpload,
     }) =>
         HomeScreen(
@@ -997,12 +779,11 @@ void main() {
           onGoToOtzaria: () {},
           onGoToLibrary: () {},
           errorReports: reports,
-          searchFeedback: feedback,
           isUploadingReports: false,
           onUploadReports: onUpload ?? () async {},
         );
 
-    testWidgets('כפתור אחד מעלה את שני הסוגים, והכמות בו היא הסכום',
+    testWidgets('הכפתור מעלה את הדיווחים בלבד, והסיכום הוא שלהם בלבד',
         (tester) async {
       final printed = <String>[];
       final originalPrint = debugPrint;
@@ -1010,16 +791,8 @@ void main() {
       outbox
         ..add('a')
         ..add('b');
-      final transport = _CountFeedback(carried: 3);
-      final feedback = SearchFeedbackController(
-        transport: transport,
-        resolveSource: () async => null,
-      );
-      addTearDown(feedback.dispose);
       final c = controller();
       await c.refreshOutbox();
-      await feedback.refreshOutbox();
-      final libraryT = stringsOf().libraryDomain;
       late BuildContext ctx;
       await pumpScreen(
         tester,
@@ -1027,33 +800,21 @@ void main() {
           ctx = context;
           return home(
             c,
-            feedback: feedback,
-            onUpload: () async => outcome = await uploadAllReports(
-              ctx,
-              errorReports: c,
-              searchFeedback: feedback,
-            ),
+            onUpload: () async =>
+                outcome = await uploadAllReports(ctx, errorReports: c),
           );
         }),
       );
 
-      expect(find.text(t.uploadButton(5)), findsOneWidget);
-      expect(find.text(libraryT.semanticFeedbackUploadAction), findsNothing);
-      expect(find.text(libraryT.semanticFeedbackUploadBody(3)), findsNothing);
-
-      await tester.tap(find.text(t.uploadButton(5)));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text(libraryT.semanticFeedbackUploadAction));
+      expect(find.text(t.uploadButton(2)), findsOneWidget);
+      await tester.tap(find.text(t.uploadButton(2)));
       await tester.pumpAndSettle();
 
+      expect(find.byType(AlertDialog), findsNothing);
       expect(outbox.reports, isEmpty);
-      expect(transport.uploads, 1);
       debugPrint = originalPrint;
       expect(outcome?.severity, ReportsUploadSeverity.success);
-      expect(printed, [
-        'UiSnack ללא overlay: ${t.uploadSummary(2, 0, 0)}\n'
-            '${libraryT.semanticFeedbackUploaded(3, 0)}',
-      ]);
+      expect(printed, ['UiSnack ללא overlay: ${t.uploadSummary(2, 0, 0)}']);
     });
 
     testWidgets('אין חיבור: נשאר הכיתוב בלבד, וכשהחיבור חוזר הכפתור מופיע',
@@ -1061,25 +822,18 @@ void main() {
       outbox
         ..add('a')
         ..add('b');
-      final transport = _CountFeedback(carried: 1);
-      final feedback = SearchFeedbackController(
-        transport: transport,
-        resolveSource: () async => null,
-      );
-      addTearDown(feedback.dispose);
       final c = controller();
       await c.refreshOutbox();
-      await feedback.refreshOutbox();
       otzaria.onlineCheckError = 'no network';
 
-      await pumpScreen(tester, home(c, feedback: feedback));
-      expect(find.text(t.uploadPendingOffline(3)), findsOneWidget);
-      expect(find.text(t.uploadButton(3)), findsNothing);
+      await pumpScreen(tester, home(c));
+      expect(find.text(t.uploadPendingOffline(2)), findsOneWidget);
+      expect(find.text(t.uploadButton(2)), findsNothing);
 
       otzaria.onlineCheckError = null;
-      await pumpScreen(tester, home(c, feedback: feedback));
-      expect(find.text(t.uploadPendingOffline(3)), findsNothing);
-      expect(find.text(t.uploadButton(3)), findsOneWidget);
+      await pumpScreen(tester, home(c));
+      expect(find.text(t.uploadPendingOffline(2)), findsNothing);
+      expect(find.text(t.uploadButton(2)), findsOneWidget);
     });
 
     testWidgets('בלי בדיקה מקוונת מוצלחת אין כפתור', (tester) async {
@@ -1093,57 +847,6 @@ void main() {
       expect(find.text(t.uploadPendingOffline(1)), findsNothing);
     });
 
-    testWidgets('עצירה בין שלבי ההעלאה משאירה את המשוב בכונן', (tester) async {
-      outbox.add('a');
-      final c = controller();
-      await c.refreshOutbox();
-      final transport = _CountFeedback(carried: 2);
-      final feedback = SearchFeedbackController(
-        transport: transport,
-        resolveSource: () async => null,
-      );
-      addTearDown(feedback.dispose);
-      final gate = Completer<void>();
-      outbox.beforeCount =
-          () => outbox.reports.isEmpty ? gate.future : Future<void>.value();
-      var stopped = false;
-      late BuildContext ctx;
-      await pumpScreen(tester, Builder(builder: (context) {
-        ctx = context;
-        return ReportsUploadSection(
-          errorReports: c,
-          searchFeedback: feedback,
-          connection: true,
-          isUploadingAll: true,
-          busy: false,
-          onUpload: null,
-          onStop: () => stopped = true,
-        );
-      }));
-      final uploading = uploadAllReports(
-        ctx,
-        errorReports: c,
-        searchFeedback: feedback,
-        isCancelled: () => stopped,
-      );
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 500));
-      await tester.tap(
-          find.text(stringsOf().libraryDomain.semanticFeedbackUploadAction));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 500));
-      expect(c.isUploading, isFalse);
-      expect(feedback.isUploading, isFalse);
-      await tester.tap(find.text(t.uploadStopButton));
-      gate.complete();
-      await tester.pump();
-      final result = await uploading;
-      expect(transport.uploads, 0);
-      expect(transport.carried, 2);
-      expect(result?.severity, ReportsUploadSeverity.info);
-      await tester.pumpWidget(const SizedBox.shrink());
-    });
-
     testWidgets('רק בדיקת הלאנצ׳ר הצליחה: אפשר להעלות', (tester) async {
       outbox.add('a');
       otzaria.onlineCheckedAt = null;
@@ -1154,96 +857,24 @@ void main() {
       expect(find.text(t.uploadButton(1)), findsOneWidget);
     });
 
-    testWidgets('משוב שזורק: סיכום הדיווחים שהועלו נשמר', (tester) async {
+    testWidgets('העלאה שנכשלה: שגיאה אחת, בלי שורות נוספות', (tester) async {
       outbox.add('a');
-      final transport = _CountFeedback(carried: 2, throwOnUpload: true);
-      final feedback = SearchFeedbackController(
-        transport: transport,
-        resolveSource: () async => null,
-      );
-      addTearDown(feedback.dispose);
-      final c = controller();
-      await c.refreshOutbox();
-      await feedback.refreshOutbox();
-      final libraryT = stringsOf().libraryDomain;
-      final printed = <String>[];
-      final originalPrint = debugPrint;
-      debugPrint = (message, {wrapWidth}) => printed.add(message ?? '');
-      late BuildContext ctx;
-      await pumpScreen(
-        tester,
-        Builder(builder: (context) {
-          ctx = context;
-          return home(
-            c,
-            feedback: feedback,
-            onUpload: () async => outcome = await uploadAllReports(
-              ctx,
-              errorReports: c,
-              searchFeedback: feedback,
-            ),
-          );
-        }),
-      );
-      await tester.tap(find.text(t.uploadButton(3)));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text(libraryT.semanticFeedbackUploadAction));
-      await tester.pumpAndSettle();
-      debugPrint = originalPrint;
-      expect(outcome?.severity, ReportsUploadSeverity.error);
-
-      expect(outbox.reports, isEmpty);
-      expect(printed, [
-        'UiSnack ללא overlay: ${t.uploadSummary(1, 0, 0)}\n'
-            '${libraryT.semanticFeedbackFailed}',
-      ]);
-    });
-
-    testWidgets('דיווחים שנכשלו: המשוב לא עולה, ונשאר בסיכום כממתין',
-        (tester) async {
-      outbox.add('a');
-      final transport = _CountFeedback(carried: 2);
-      final feedback = SearchFeedbackController(
-        transport: transport,
-        resolveSource: () async => null,
-      );
-      addTearDown(feedback.dispose);
       final c = controller(
         client: MockClient((_) async => http.Response('oops', 500)),
       );
       await c.refreshOutbox();
-      await feedback.refreshOutbox();
-      final libraryT = stringsOf().libraryDomain;
       final printed = <String>[];
       final originalPrint = debugPrint;
       debugPrint = (message, {wrapWidth}) => printed.add(message ?? '');
-      late BuildContext ctx;
-      await pumpScreen(
-        tester,
-        Builder(builder: (context) {
-          ctx = context;
-          return home(
-            c,
-            feedback: feedback,
-            onUpload: () async => outcome = await uploadAllReports(
-              ctx,
-              errorReports: c,
-              searchFeedback: feedback,
-            ),
-          );
-        }),
-      );
-      await tester.tap(find.text(t.uploadButton(3)));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text(libraryT.semanticFeedbackUploadAction));
+      final ctx = await host(tester);
+      final result = await uploadAllReports(ctx, errorReports: c);
       await tester.pumpAndSettle();
       debugPrint = originalPrint;
-      expect(outcome?.severity, ReportsUploadSeverity.error);
 
-      expect(transport.uploads, 0);
-      expect(transport.carried, 2);
+      expect(result?.severity, ReportsUploadSeverity.error);
+      expect(outbox.reports, hasLength(1));
       expect(printed, hasLength(1));
-      expect(printed.single, contains(libraryT.semanticFeedbackUploaded(0, 2)));
+      expect(printed.single, startsWith('UiSnack'));
     });
 
     testWidgets('העלאת דיווחים שחזרה null אינה נספרת כהצלחה', (tester) async {
@@ -1261,21 +892,17 @@ void main() {
     });
     testWidgets('איסוף רץ: לחיצה על העלאה מודיעה ואינה מדלגת בשקט',
         (tester) async {
-      final transport = _CountFeedback(carried: 2);
-      final feedback = SearchFeedbackController(
-        transport: transport,
-        resolveSource: () async => null,
-      )..isCollecting = true;
-      addTearDown(feedback.dispose);
-      final c = controller();
+      outbox.add('a');
+      final c = controller()..isCollecting = true;
+      await c.refreshOutbox();
       final printed = <String>[];
       final originalPrint = debugPrint;
       debugPrint = (message, {wrapWidth}) => printed.add(message ?? '');
       final ctx = await host(tester);
-      await uploadAllReports(ctx, errorReports: c, searchFeedback: feedback);
+      await uploadAllReports(ctx, errorReports: c);
       debugPrint = originalPrint;
 
-      expect(transport.uploads, 0);
+      expect(outbox.reports, hasLength(1));
       expect(printed, ['UiSnack ללא overlay: ${t.uploadCollectingBusy}']);
     });
     testWidgets('מופיע רק כשיש דיווחים בתיבה', (tester) async {
@@ -1637,43 +1264,12 @@ class _BrokenOutbox implements ReportOutbox {
   Future<void> discard(String reportId) async {}
 }
 
-class _CollectionFeedback extends SearchFeedbackTransport {
-  _CollectionFeedback()
-      : super('unused',
-            client: MockClient((_) async => http.Response('{}', 200)));
-
-  int pendingEvents = 3;
-  int carried = 0;
-  int collections = 0;
-  bool failCollection = false;
-
-  @override
-  Future<int> pendingForCollection(String sourceDirectory) async =>
-      pendingEvents;
-
-  @override
-  Future<int> count() async => carried;
-
-  @override
-  Future<int> collect(String sourceDirectory,
-      {required Future<bool> Function() mayCollect}) async {
-    collections++;
-    if (failCollection) throw StateError('feedback disk failure');
-    if (!await mayCollect()) return 0;
-    final result = pendingEvents;
-    carried += result;
-    pendingEvents = 0;
-    return result;
-  }
-}
-
 class _QaQueue implements OtzariaReportQueue {
-  _QaQueue(this.pending, {this.onCount, this.onCollect, this.partial = false});
+  _QaQueue(this.pending, {this.onCount, this.partial = false});
 
   int pending;
   int collections = 0;
   final void Function()? onCount;
-  final void Function()? onCollect;
   final bool partial;
 
   @override
@@ -1685,35 +1281,12 @@ class _QaQueue implements OtzariaReportQueue {
   @override
   Future<QueueCollectResult> collectTo(ReportOutbox outbox) async {
     collections++;
-    onCollect?.call();
     final moved = partial ? pending - 1 : pending;
     for (var i = 0; i < moved; i++) {
       await outbox.write('qa$i', OutboxReport.encodeFile(_report('qa$i')));
     }
     pending -= moved;
     return (collected: moved, error: partial ? 'report disk failure' : null);
-  }
-}
-
-class _CountFeedback extends SearchFeedbackTransport {
-  _CountFeedback({required this.carried, this.throwOnUpload = false})
-      : super('unused',
-            client: MockClient((_) async => http.Response('{}', 200)));
-
-  int carried;
-  final bool throwOnUpload;
-  int uploads = 0;
-
-  @override
-  Future<int> count() async => carried;
-
-  @override
-  Future<SearchFeedbackUploadResult> upload() async {
-    uploads++;
-    if (throwOnUpload) throw StateError('boom');
-    final sent = carried;
-    carried = 0;
-    return (sent: sent, rejected: 0, remaining: 0);
   }
 }
 

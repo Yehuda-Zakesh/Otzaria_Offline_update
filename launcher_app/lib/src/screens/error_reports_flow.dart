@@ -2,8 +2,6 @@ import 'package:flutter/widgets.dart';
 import 'package:otzaria_l10n/otzaria_l10n.dart';
 
 import '../controllers/error_reports_controller.dart';
-import '../controllers/search_feedback_controller.dart';
-import '../services/app_logger.dart';
 import '../services/notices_seen_store.dart';
 import '../widgets/widgets_exports.dart';
 
@@ -41,12 +39,10 @@ Future<ReportOfferOutcome> offerErrorReportCollection(
   bool readOnly = false,
   required Future<bool> Function() isOtzariaRunning,
   NoticesSeenStore? notices,
-  SearchFeedbackController? searchFeedback,
 }) async {
   if (readOnly) return ReportOfferOutcome.notOffered;
   if (await isOtzariaRunning()) return ReportOfferOutcome.notOffered;
   final count = await controller.pendingToOffer();
-  final feedbackCount = await searchFeedback?.pendingToOffer() ?? 0;
   if (!context.mounted) return ReportOfferOutcome.notOffered;
   final t = context.strings.errorReports;
   const legacyKey = NoticesSeenStore.legacyReportsNotice;
@@ -63,26 +59,20 @@ Future<ReportOfferOutcome> offerErrorReportCollection(
     await notices.markSeen(legacyKey);
     if (!context.mounted) return ReportOfferOutcome.notOffered;
   }
-  if (count + feedbackCount <= 0) return ReportOfferOutcome.notOffered;
+  if (count <= 0) return ReportOfferOutcome.notOffered;
   if (await isOtzariaRunning() || !context.mounted) {
     return ReportOfferOutcome.notOffered;
   }
 
   final approved = await showTwoActionsDialog(
     context: context,
-    title: feedbackCount > 0 ? t.collectAllDialogTitle : t.collectDialogTitle,
-    content: [
-      if (count > 0) t.collectDialogContent(count),
-      if (feedbackCount > 0)
-        context.strings.libraryDomain
-            .semanticFeedbackCollectBody(feedbackCount),
-    ].join('\n\n'),
+    title: t.collectDialogTitle,
+    content: t.collectDialogContent(count),
     cancelText: t.collectLater,
     confirmText: t.collectConfirm,
   );
   if (!approved) {
-    if (count > 0) controller.markDeclined(count);
-    if (feedbackCount > 0) searchFeedback?.markDeclined(feedbackCount);
+    controller.markDeclined(count);
     return ReportOfferOutcome.declined;
   }
 
@@ -92,41 +82,14 @@ Future<ReportOfferOutcome> offerErrorReportCollection(
     return ReportOfferOutcome.otzariaOpened;
   }
 
-  final outcome =
-      count > 0 ? await controller.collect() : (collected: 0, error: null);
+  final outcome = await controller.collect();
   final error = outcome.error;
-  final lines = <String>[];
-  if (count > 0) {
-    lines.add(error == null
-        ? s.collectedSnack(outcome.collected)
-        : outcome.collected > 0
-            ? s.collectPartialSnack(outcome.collected, error)
-            : s.collectFailedSnack(error));
-  }
-  var feedbackFailed = false;
-  var feedbackCollected = 0;
-  if (feedbackCount > 0 && searchFeedback != null) {
-    final libraryStrings = AppL10n.strings.libraryDomain;
-    try {
-      if (!await isOtzariaRunning()) {
-        feedbackCollected = await searchFeedback.collect();
-      }
-      lines.add(feedbackCollected > 0
-          ? libraryStrings.semanticFeedbackCollected(feedbackCollected)
-          : libraryStrings.semanticFeedbackNotCollected);
-    } catch (error) {
-      AppLogger.maybeInstance?.error('איסוף משוב החיפוש נכשל', error);
-      feedbackFailed = true;
-      lines.add(libraryStrings.semanticFeedbackFailed);
-    }
-  }
-  final message = lines.join('\n');
-  if (error != null || feedbackFailed) {
-    UiSnack.showError(message);
-  } else if (feedbackCount > 0 && feedbackCollected == 0) {
-    UiSnack.show(message);
+  if (error == null) {
+    UiSnack.showSuccess(s.collectedSnack(outcome.collected));
   } else {
-    UiSnack.showSuccess(message);
+    UiSnack.showError(outcome.collected > 0
+        ? s.collectPartialSnack(outcome.collected, error)
+        : s.collectFailedSnack(error));
   }
   return ReportOfferOutcome.collected;
 }

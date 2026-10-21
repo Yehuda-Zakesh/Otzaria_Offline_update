@@ -10,6 +10,7 @@ class ReportOfferCoordinator {
     required this.runDialog,
     required this.perform,
     this.holdGrace = const Duration(seconds: 3),
+    this.onResume,
   }) {
     _trigger = ReportOfferTrigger(_offer, isBusy: () => busy);
   }
@@ -20,6 +21,10 @@ class ReportOfferCoordinator {
   final Future<bool?> Function(Future<bool> Function() body) runDialog;
   final Future<void> Function() perform;
   final Duration holdGrace;
+
+  /// נקרא בכל [resume], גם בסוף ההמתנה שאחרי סגירת אוצריא מהלאנצ'ר — מי
+  /// שממתין ל-[busy] בלי לעבור דרך הטריגר הזה.
+  final void Function()? onResume;
 
   late final ReportOfferTrigger _trigger;
   bool _uploadActive = false;
@@ -36,7 +41,9 @@ class ReportOfferCoordinator {
   Future<void> request() => _trigger.request();
 
   void resume() {
-    if (!_disposed) _trigger.resume();
+    if (_disposed) return;
+    _trigger.resume();
+    onResume?.call();
   }
 
   void setUploadActive(bool active) {
