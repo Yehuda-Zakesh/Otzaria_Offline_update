@@ -167,6 +167,58 @@ void main() {
       await first;
       expect(codes, isEmpty);
     });
+
+    test('אישור יחיד: בקשות חוזרות בזמן שהחלון נסגר אינן שואלות שוב', () async {
+      var asked = 0;
+      LauncherCrashSession.closeGuard = () async {
+        asked++;
+        return true;
+      };
+      final destroying = Completer<void>();
+      var destroyed = 0;
+      final codes = <int>[];
+      Future<void> request() => LauncherCrashSession.requestClose(
+            destroy: () {
+              destroyed++;
+              return destroying.future;
+            },
+            exitProcess: codes.add,
+          );
+
+      final first = request();
+      await pumpEventQueue();
+      for (var i = 0; i < 3; i++) {
+        await request();
+        await pumpEventQueue();
+      }
+      expect(asked, 1);
+      expect(destroyed, 1);
+
+      destroying.complete();
+      await first;
+      expect(codes, [0]);
+      expect(asked, 1);
+    });
+
+    test('המשך: בקשה חדשה שואלת פעם אחת, ואישור סוגר אחרי אישור יחיד',
+        () async {
+      final answers = [false, true];
+      var asked = 0;
+      LauncherCrashSession.closeGuard = () async => answers[asked++];
+      final codes = <int>[];
+      Future<void> request() => LauncherCrashSession.requestClose(
+            destroy: () async {},
+            exitProcess: codes.add,
+          );
+
+      await request();
+      expect(asked, 1);
+      expect(codes, isEmpty);
+
+      await request();
+      expect(asked, 2);
+      expect(codes, [0]);
+    });
   });
 
   group('installCloseHooks', () {
