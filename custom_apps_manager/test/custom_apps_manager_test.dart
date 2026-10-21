@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -566,6 +567,63 @@ void main() {
       expect(runner.calls, isEmpty);
       expect(outcome.kind, CustomInstallerKind.portableFile);
       expect(File(p.join(target, 'MyApp.exe')).existsSync(), isTrue);
+    });
+
+    test('בלי כללי זיהוי: אינו נכנס לשלב הלמידה ואינו מריץ דבר', () async {
+      var learningStarted = 0;
+      final m = CustomAppsManager(
+        resolveMirrorDir: () async => root,
+        readVersion: (_) => '1.4.2',
+        processRunner: runner.call,
+        downloadsDir: p.join(root, 'Downloads'),
+        lookupUninstallEntries: () async => const [],
+        onLearningStarted: () => learningStarted++,
+      );
+      await m.add(descriptor(id: 'portable', portableFile: true));
+      await m.attachInstaller(
+        'portable',
+        sourcePath: writeFile(p.join(root, 'src', 'EcMenu.exe'), 'MZ'),
+        version: '1.0',
+      );
+
+      await m.install('portable', copyToDir: p.join(root, 'Tools'));
+
+      expect(learningStarted, 0);
+      expect(runner.calls, isEmpty);
+    });
+
+    test('מופעל כמתקין (לא הוצהר כנייד): למידה מתחילה רק אחרי שהתהליך יצא',
+        () async {
+      var learningStarted = 0;
+      final running = Completer<ProcessResult>();
+      final m = CustomAppsManager(
+        resolveMirrorDir: () async => root,
+        readVersion: (_) => '1.4.2',
+        processRunner: (_, __) => running.future,
+        downloadsDir: p.join(root, 'Downloads'),
+        lookupUninstallEntries: () async => const [],
+        learner: InstallLearner(
+          lookupUninstallEntries: () async => const [],
+          onStart: () => learningStarted++,
+          sleep: (_) async {},
+        ),
+      );
+      await m.add(descriptor(id: 'plain'));
+      await m.attachInstaller(
+        'plain',
+        sourcePath: writeFile(p.join(root, 'src', 'EcMenu.exe'), 'MZ'),
+        version: '1.0',
+      );
+      await m.recordInstallerHash('plain');
+      await m.trustHere('plain');
+
+      final done = m.install('plain');
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(learningStarted, 0);
+
+      running.complete(ProcessResult(1, 0, '', ''));
+      await done;
+      expect(learningStarted, 1);
     });
 
     // מתקין רגיל מלמד דרך רג'יסטרי ההסרה; כאן אין רישום כזה — אבל אנחנו
